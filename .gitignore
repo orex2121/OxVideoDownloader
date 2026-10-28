@@ -1,0 +1,20 @@
+# Portable runtime (95 MB) — rebuilt from requirements.txt, see README
+python/
+
+# FFmpeg binaries — downloaded automatically on first run
+ffmpeg/
+
+# Per-user runtime state — recreated on first run
+config.json
+tasks.json
+.thumbnails/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Icon design sources / one-off previews (regenerate with make_gemini_icon.py)
+icon_gemini_new.png
+obsidian_copper_preview.png
+assets/icon_gemini_ox.png
+assets/app_source.png
