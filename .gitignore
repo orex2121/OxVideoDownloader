@@ -1,6 +1,9 @@
 # Portable runtime (95 MB) — rebuilt from requirements.txt, see README
 python/
 
+# Downloaded Python installer (normally kept only in %TEMP%)
+python-*-amd64.exe
+
 # FFmpeg binaries — downloaded automatically on first run
 ffmpeg/
 

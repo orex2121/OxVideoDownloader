@@ -1,12 +1,14 @@
 @echo off
-rem OxVideoDownloader launcher. The app is fully portable: this folder ships
-rem its own Python (python\), the yt-dlp engine, tkinter and ffmpeg (ffmpeg\).
-rem Copy the whole folder to another Windows x64 PC and it runs as-is.
+setlocal EnableExtensions
 cd /d "%~dp0"
+
 if not exist "python\pythonw.exe" (
-    echo Error: the bundled Python interpreter in the "python" folder is missing.
-    pause
-    exit /b 1
+    echo The portable Python environment is missing.
+    choice /C YN /N /M "Run INSTALL.bat now? [Y/N] "
+    if errorlevel 2 exit /b 1
+    call "%~dp0INSTALL.bat"
+    if errorlevel 1 exit /b 1
 )
-start "" "python\pythonw.exe" oxvideodownloader.py
+
+start "" "python\pythonw.exe" "%~dp0oxvideodownloader.py"
 exit /b 0

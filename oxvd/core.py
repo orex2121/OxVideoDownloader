@@ -352,6 +352,7 @@ def run_download(t, cfg, thumb_dir):
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([t.source])
             _locate_output(t)
+            ensure_thumbnail(t, cfg, thumb_dir)
             cv = t.dl_opts.get("cv") or {}
             if cv.get("container") and t.final_path and t.interrupt is None:
                 _post_convert(t, cfg)
@@ -532,6 +533,43 @@ def _grab_thumbnail(url, dest):
     except OSError:
         return False
     return True
+
+
+def ensure_thumbnail(t, cfg, thumb_dir):
+    """Create a preview from the downloaded video when its CDN thumbnail
+    could not be fetched.  This keeps previews working on networks where
+    hosts such as i.ytimg.com are blocked or time out."""
+    vid = t.thumb_path
+    src = t.final_path
+    ffmpeg = cfg.get("ffmpeg")
+    if (not vid or not src or not ffmpeg or not thumb_dir
+            or thumb_cached(thumb_dir, vid)
+            or not os.path.isfile(src)):
+        return False
+    os.makedirs(thumb_dir, exist_ok=True)
+    dest = os.path.join(thumb_dir, f"{vid}.jpg")
+    tmp = os.path.join(thumb_dir, f"{vid}.tmp.jpg")
+    cmd = [ffmpeg, "-y", "-nostdin", "-loglevel", "error",
+           "-ss", "1", "-i", src, "-map", "0:v:0", "-frames:v", "1",
+           "-vf", "scale=320:-2", "-q:v", "3", tmp]
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode == 0:
+            with open(tmp, "rb") as f:
+                valid = _image_head_ok(f.read(12))
+            if valid:
+                os.replace(tmp, dest)
+                return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
 
 
 def _make_hook(t, thumb_dir):

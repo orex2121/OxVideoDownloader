@@ -56,16 +56,30 @@
 
 ### 📦 Getting Started
 
-1. **Get the code:** Run `git clone` on the repository (or download and unzip the archive).
-2. **Choose how to run:**
-   - **A) Bring your own Python:** Install Python 3.12+ x64 with `pip`, install dependencies via `pip install -r requirements.txt`, then run `python oxvideodownloader.py` or double-click `"OxVideo Downloader.bat"`.
-   - **B) Portable mode:** Place an embeddable Python 3.12 x64 environment (with `pip` and `requirements.txt` packages installed) inside a `python\` subfolder next to the app, then double-click `"OxVideo Downloader.exe"`.
-3. **First launch:** The application checks for `FFmpeg` inside `ffmpeg\` and downloads the required binaries automatically.
+Choose one of these installation methods:
+
+1. **Ready-made portable build (recommended):** Download the latest archive from [GitHub Releases](https://github.com/orex2121/OxVideoDownloader/releases), extract it to any writable folder, and run `"OxVideo Downloader.exe"`. The portable package already contains the Python environment, all dependencies, and FFmpeg. No installation is required.
+2. **Build from the repository:** Download or clone [the repository](https://github.com/orex2121/OxVideoDownloader), then double-click `INSTALL.bat`. It downloads the official Python 3.12 x64 installer, installs Python with Tkinter into the local `python\` folder, installs the packages from `requirements.txt`, and verifies the result. Run `"OxVideo Downloader.exe"` afterward. FFmpeg is downloaded automatically on the first application start.
+
+After either method, the entire application folder can be moved or copied to another Windows x64 computer. A system-wide Python installation is not required.
+
+`python\`, `ffmpeg\`, `config.json`, `tasks.json`, and `.thumbnails\` are intentionally excluded from Git. Therefore a fresh clone is the **source distribution**, not a ready-to-run portable binary package. For a ready-made release, archive the whole folder after running `INSTALL.bat` and completing the first launch.
+
+### 🔄 Updating
+
+1. Close OxVideoDownloader.
+2. Double-click `UPDATE.bat` and wait for the success message.
+3. Start the application normally.
+
+The updater downloads the latest files from the `main` branch of [the GitHub repository](https://github.com/orex2121/OxVideoDownloader), updates Python dependencies, and preserves the local `python\`, `ffmpeg\`, `config.json`, `tasks.json`, and `.thumbnails\` data. An internet connection is required. Do not interrupt the updater while files are being copied.
 
 ### 🗂 Project Layout
 
 ```text
 ├── oxvideodownloader.py   # Application entry point
+├── INSTALL.bat             # Builds the local portable Python environment
+├── UPDATE.bat              # Updates the application from GitHub
+├── update.ps1              # Update implementation used by UPDATE.bat
 ├── oxvd/
 │   ├── core.py            # Download, queue, and FFmpeg conversion logic
 │   ├── ui.py              # Tkinter GUI views and components
@@ -120,16 +134,30 @@
 
 ### 📦 Установка и запуск
 
-1. **Получите исходный код:** Выполните `git clone` репозитория (или скачайте и распакуйте архив).
-2. **Выберите способ запуска:**
-   - **A) Системный Python:** Установите Python 3.12+ x64 с `pip`, установите зависимости командой `pip install -r requirements.txt`, после чего запустите `python oxvideodownloader.py` или дважды кликните по `"OxVideo Downloader.bat"`.
-   - **B) Портативный режим:** Поместите портативное окружение Python 3.12 x64 (с установленным `pip` и пакетами из `requirements.txt`) в подпапку `python\` рядом с приложением, затем дважды кликните по `"OxVideo Downloader.exe"`.
-3. **Первый запуск:** Приложение проверит наличие `FFmpeg` в папке `ffmpeg\` и автоматически докачает необходимые исполняемые файлы.
+Выберите один из двух вариантов установки:
+
+1. **Готовая portable-сборка (рекомендуется):** Скачайте последний архив со страницы [GitHub Releases](https://github.com/orex2121/OxVideoDownloader/releases), распакуйте его в любую доступную для записи папку и запустите `"OxVideo Downloader.exe"`. Готовая portable-сборка уже содержит окружение Python, все зависимости и FFmpeg. Установка не требуется.
+2. **Сборка из репозитория:** Скачайте или клонируйте [репозиторий](https://github.com/orex2121/OxVideoDownloader), затем запустите `INSTALL.bat`. Он скачает официальный установщик Python 3.12 x64, установит Python вместе с Tkinter в локальную папку `python\`, установит пакеты из `requirements.txt` и проверит результат. После этого запустите `"OxVideo Downloader.exe"`. FFmpeg будет автоматически скачан при первом запуске приложения.
+
+После установки всю папку приложения можно переносить или копировать на другой компьютер с Windows x64. Системная установка Python там не требуется.
+
+Папки `python\`, `ffmpeg\`, а также `config.json`, `tasks.json` и `.thumbnails\` намеренно исключены из Git. Поэтому свежий clone — это **исходный дистрибутив**, а не готовая portable-сборка. Для готового релиза заархивируйте всю папку после выполнения `INSTALL.bat` и первого запуска.
+
+### 🔄 Обновление
+
+1. Закройте OxVideoDownloader.
+2. Запустите `UPDATE.bat` и дождитесь сообщения об успешном завершении.
+3. Запустите приложение обычным способом.
+
+Обновлятор скачивает последние файлы из ветки `main` [репозитория GitHub](https://github.com/orex2121/OxVideoDownloader), обновляет зависимости Python и сохраняет локальные папки `python\`, `ffmpeg\`, а также файлы `config.json`, `tasks.json` и `.thumbnails\`. Для обновления требуется интернет. Не прерывайте процесс во время копирования файлов.
 
 ### 🗂 Структура проекта
 
 ```text
 ├── oxvideodownloader.py   # Точка входа приложения
+├── INSTALL.bat             # Создание локального portable-окружения Python
+├── UPDATE.bat              # Обновление приложения с GitHub
+├── update.ps1              # Логика обновления для UPDATE.bat
 ├── oxvd/
 │   ├── core.py            # Логика загрузки, очереди и конвертации через FFmpeg
 │   ├── ui.py              # Компоненты и экраны графического интерфейса Tkinter

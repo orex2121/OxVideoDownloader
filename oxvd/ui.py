@@ -1588,6 +1588,14 @@ class App:
             if t.thumb_path:
                 self._note_thumb(t)
             if (t.status == "Done" and t.kind == "download"
+                    and t.thumb_path and t.final_path
+                    and not core.thumb_cached(THUMB_DIR, t.thumb_path)
+                    and not getattr(t, "_thumb_repair", False)):
+                t._thumb_repair = True
+                threading.Thread(
+                    target=core.ensure_thumbnail,
+                    args=(t, self._env, THUMB_DIR), daemon=True).start()
+            if (t.status == "Done" and t.kind == "download"
                     and not t.final_path and not getattr(t, "_loc", False)):
                 t._loc = True
                 core._locate_output(t)   # fill final_path for the size column
