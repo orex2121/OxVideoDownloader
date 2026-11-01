@@ -128,5 +128,7 @@
  "First run: downloading FFmpeg...": "Первый запуск: скачиваем FFmpeg...",
  "Extracting...": "Распаковка...",
  "FFmpeg installed": "FFmpeg установлен",
- "Could not download FFmpeg. Check your internet connection and restart the app.": "Не удалось скачать FFmpeg. Проверьте подключение к интернету и перезапустите приложение."
+ "Could not download FFmpeg. Check your internet connection and restart the app.": "Не удалось скачать FFmpeg. Проверьте подключение к интернету и перезапустите приложение.",
+ "ffmpeg arguments help": "Справка: аргументы ffmpeg",
+ "This folder cannot be written to: Windows protects the root of the C: drive. Pick or create a normal folder (for example C:\\Video).": "В эту папку нельзя сохранять: Windows запрещает запись в корень диска C:. Выберите или создайте обычную папку (например, C:\\Video)."
 }

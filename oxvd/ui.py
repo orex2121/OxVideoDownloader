@@ -13,6 +13,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
 from . import core
+from . import i18n
 from .i18n import T, set_lang, plural, LANGS
 from .themes import THEMES, shade
 
@@ -64,6 +65,82 @@ CONFIG_FILE = os.path.join(ROOT, "config.json")
 TASKS_FILE = os.path.join(ROOT, "tasks.json")
 THUMB_DIR = os.path.join(ROOT, ".thumbnails")
 THUMB_INDEX = os.path.join(THUMB_DIR, "index.json")
+
+
+def default_download_folder():
+    """Return the current Windows user's Videos folder, including a
+    OneDrive/Explorer redirection when Windows has one configured."""
+    if os.name == "nt":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+            value, _ = winreg.QueryValueEx(key, "My Video")
+            winreg.CloseKey(key)
+            if value:
+                return os.path.normpath(os.path.expandvars(value))
+        except OSError:
+            pass
+    return os.path.normpath(os.path.join(os.path.expanduser("~"), "Videos"))
+
+
+def _other_windows_profile(path):
+    """Detect a path copied from another C:\\Users\\<name> profile."""
+    if os.name != "nt":
+        return False
+    profile = os.path.normcase(os.path.abspath(
+        os.environ.get("USERPROFILE") or os.path.expanduser("~")))
+    users = os.path.normcase(os.path.dirname(profile))
+    candidate = os.path.normcase(os.path.abspath(path))
+    try:
+        under_users = os.path.commonpath((candidate, users)) == users
+        under_current = os.path.commonpath((candidate, profile)) == profile
+    except ValueError:
+        return False
+    return under_users and not under_current
+
+
+def ensure_download_folder(path, fallback=None):
+    """Return a writable save folder and never reuse another user's path.
+
+    Portable releases can accidentally contain config/tasks from the build
+    machine.  Probe candidate folders now so a download cannot fail later
+    with Access Denied for C:\\Users\\<builder>.
+    """
+    requested = os.path.normpath(os.path.expandvars(
+        os.path.expanduser(str(path or "")))) if path else ""
+    default = os.path.normpath(fallback or default_download_folder())
+    profile = os.path.normpath(
+        os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+    candidates = (requested, default, default_download_folder(),
+                  os.path.join(profile, "Documents"), profile)
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.abspath(candidate)
+        key = os.path.normcase(candidate)
+        if key in seen or _other_windows_profile(candidate):
+            continue
+        seen.add(key)
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            # Plain open() probe, NOT tempfile.NamedTemporaryFile: for a
+            # drive root like C:\ its random-name generator spins forever
+            # (CPython bug, seen on 3.12 embeddable) and the whole UI
+            # freezes the moment the user picks C:\ in the folder dialog.
+            probe = os.path.join(candidate, ".oxvd-write-test.tmp")
+            with open(probe, "wb"):
+                pass
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+            return os.path.normpath(candidate)
+        except OSError:
+            continue
+    return default
 
 
 def norm_url(url):
@@ -127,10 +204,17 @@ class App:
         self.cfg = self._load_config()
         set_lang(self.cfg.get("lang", "en"))
         self._theme = set_theme(self.cfg.get("theme", "Obsidian Copper"))
-        self.folder = self.cfg.get("download_folder") or os.path.join(
-            os.path.expanduser("~"), "Videos")
+        configured_folder = self.cfg.get("download_folder")
+        self.folder = ensure_download_folder(configured_folder)
+        # Convert-tab output folder is kept separate from the download
+        # folder so each tab remembers its own last-used path.
+        self._cv_folder = ensure_download_folder(
+            self.cfg.get("convert_folder") or self.folder)
         self.cookies_browser = self.cfg.get("cookies_browser") or None
         self.history = self.cfg.get("history", [])[:10]
+        if configured_folder != self.folder:
+            self.cfg["download_folder"] = self.folder
+            self._save_config()
         # prefer the ffmpeg/ffprobe bundled inside the app folder (portable),
         # fall back to whatever is on PATH
         def _tool(name):
@@ -276,6 +360,30 @@ class App:
                        activebackground=PRESSED, activeforeground=FG)
 
     # --------------------------------------------------------------- icons
+    def _gear_photo(self):
+        """Menu gear: the white-on-black mask PNG turned into an RGBA photo
+        in the theme green — the same color as the Paste URL button."""
+        key = "gear:" + GREEN
+        if key in self._icons:
+            return self._icons[key]
+        path = os.path.join(ICON_DIR, "gear_mask.png")
+        photo = None
+        if HAS_PIL and os.path.exists(path):
+            try:
+                mask = Image.open(path).convert("L").resize(
+                    (20, 20), Image.LANCZOS)
+                r, g, b = (int(GREEN[i:i + 2], 16) for i in (1, 3, 5))
+                img = Image.new("RGBA", mask.size, (r, g, b, 0))
+                m, o = mask.load(), img.load()
+                for y in range(mask.height):
+                    for x in range(mask.width):
+                        o[x, y] = (r, g, b, m[x, y])
+                photo = ImageTk.PhotoImage(img)
+            except Exception:
+                photo = None
+        self._icons[key] = photo
+        return photo
+
     def _img(self, name):
         if name not in self._icons:
             path = os.path.join(ICON_DIR, name)
@@ -365,21 +473,28 @@ class App:
             if r.get("kind") not in ("download", "convert") \
                     or not r.get("source"):
                 continue
-            t = core.Task(r["kind"], str(r["source"]),
-                          str(r.get("folder") or self.folder))
+            saved_folder = str(r.get("folder") or self.folder)
+            task_folder = ensure_download_folder(saved_folder, self.folder)
+            folder_repaired = os.path.normcase(os.path.abspath(saved_folder)) \
+                != os.path.normcase(os.path.abspath(task_folder))
+            t = core.Task(r["kind"], str(r["source"]), task_folder)
             try:
                 t.id = int(r["id"])
             except (KeyError, TypeError, ValueError):
                 pass
             t.title = r.get("title") or ""
-            t.note = r.get("note") or ""
+            t.note = "" if folder_repaired else (r.get("note") or "")
             t.item = r.get("item") or ""
             t.duration_text = r.get("duration_text") or ""
             t.thumb_path = r.get("thumb_path")
             t.final_path = r.get("final_path")
+            if folder_repaired and t.final_path \
+                    and not os.path.isfile(t.final_path):
+                t.final_path = None
             if r.get("status") in ("Queued", "Paused", "Done", "Failed",
                                    "Canceled"):
-                t.status = r["status"]
+                t.status = "Paused" if folder_repaired \
+                    and r["status"] == "Failed" else r["status"]
             t.pct = r.get("pct")
             t.downloaded = r.get("downloaded")
             t.total_bytes = r.get("total_bytes")
@@ -448,9 +563,20 @@ class App:
             line = tk.Frame(f, bg=BLUE, height=3)
             line.pack(side="top", fill="x")
             self.tab_btns[name] = (f, b, line)
-        self.hamburger = tk.Menubutton(
-            strip, text="☰", bd=0, bg=BG, fg=FG, activebackground=PRESSED,
-            font=("Segoe UI", 14), direction="below")
+        # Settings gear.  The Unicode "⚙" glyph renders as a tiny broken
+        # star in most fonts, so we tint the Gemini-drawn gear mask PNG to
+        # the theme fg and fall back to the glyph only if that asset is
+        # missing (or Pillow is unavailable).
+        gear = self._gear_photo()
+        if gear is not None:
+            self.hamburger = tk.Menubutton(
+                strip, image=gear, bd=0, bg=BG,
+                activebackground=PRESSED, direction="below")
+        else:
+            self.hamburger = tk.Menubutton(
+                strip, text="⚙", bd=0, bg=BG, fg=FG,
+                activebackground=PRESSED, font=("Segoe UI Symbol", 15),
+                direction="below")
         menu = self._themed_menu(self.hamburger)
         menu.add_command(label=T("Change download folder..."),
                          command=self.change_folder)
@@ -553,6 +679,10 @@ class App:
         self.d_folder.place(x=L, y=116, width=HALF, height=30)
         self._combo_icon(self.d_folder, "folder.png")
         aux(116, T("Browse..."), lambda: self.browse(self.d_folder))
+        # Remember the typed path right away — not only when a download
+        # is started — so the same folder is back on the next launch.
+        for ev in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+            self.d_folder.bind(ev, lambda e: self._save_d_folder())
 
         by = 164
         tk.Button(form, text=T("Download Now"), fg="white", bg=BLUE,
@@ -701,6 +831,78 @@ class App:
                                          title=T("Save to folder"))
         if folder:
             combo.set(os.path.normpath(folder))
+            # .set() fires no virtual events, so persist the choice here.
+            # warn=True: an explicit dialog pick that turns out unwritable
+            # (e.g. C:\) must explain itself instead of silently reverting.
+            if combo is self.d_folder:
+                self._save_d_folder(warn=True)
+            else:
+                self._c_folder_edited(warn=True)
+
+    def _save_d_folder(self, warn=False):
+        """The Download-tab path IS the app download folder: persist it
+        as soon as the user picks or types it, so the next launch shows
+        the same path."""
+        path = self.d_folder.get().strip()
+        if not path:
+            self.d_folder.set(self.folder)
+            return
+        new = ensure_download_folder(path, self.folder)
+        if warn and os.path.normcase(new) != os.path.normcase(path):
+            messagebox.showwarning(
+                APP_NAME, T("This folder cannot be written to: Windows "
+                            "protects the root of the C: drive. Pick or "
+                            "create a normal folder (for example C:\\Video)."))
+        self.folder = new
+        self.d_folder.set(self.folder)
+        self._save_config()
+
+    def _sync_c_folder(self):
+        """Show the folder the converted file will really land in: with
+        'Same as input folder' ticked that is the source file's folder."""
+        if not hasattr(self, "c_folder"):
+            return
+        src = self.c_src.get().strip()
+        if self.c_same.get() and src and os.path.isfile(src):
+            self.c_folder.set(os.path.dirname(os.path.normpath(src)))
+        else:
+            self.c_folder.set(self._cv_folder)
+
+    def _c_folder_edited(self, warn=False):
+        if self.c_same.get():
+            # While the checkbox is on the field mirrors the source
+            # folder; a manual edit there is meaningless — revert it.
+            self._sync_c_folder()
+            return
+        path = self.c_folder.get().strip()
+        if not path:
+            self.c_folder.set(self._cv_folder)
+            return
+        new = ensure_download_folder(path, self.folder)
+        if warn and os.path.normcase(new) != os.path.normcase(path):
+            messagebox.showwarning(
+                APP_NAME, T("This folder cannot be written to: Windows "
+                            "protects the root of the C: drive. Pick or "
+                            "create a normal folder (for example C:\\Video)."))
+        self._cv_folder = new
+        self.c_folder.set(self._cv_folder)
+        self.cfg["convert_folder"] = self._cv_folder
+        self._save_config()
+
+    def _center_over_root(self, win, dw=None, dh=None):
+        """Place a dialog centered over the main window and keep it
+        above the app (transient).  The WM default centers on the
+        primary monitor, which on multi-monitor setups lands on the
+        wrong screen."""
+        win.transient(self.root)
+        win.update_idletasks()
+        dw = dw or win.winfo_reqwidth()
+        dh = dh or win.winfo_reqheight()
+        rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+        rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        win.geometry("+%d+%d" % (max(0, rx + (rw - dw) // 2),
+                                 max(0, ry + (rh - dh) // 2)))
+        win.lift()
 
     # --------------------------------------------------------- Convert tab
     def _build_convert_tab(self):
@@ -734,6 +936,7 @@ class App:
         self.c_src = tk.Entry(form, font=("Segoe UI", 10), bg=FIELD, fg=FG,
                               highlightthickness=1, highlightbackground=SEP)
         self.c_src.place(x=L, y=0, width=HALF, height=30)
+        self.c_src.bind("<KeyRelease>", lambda e: self._sync_c_folder())
         aux(0, T("Browse..."), self.browse_source)
 
         dot(46)
@@ -751,18 +954,22 @@ class App:
 
         self.c_same = tk.BooleanVar(value=True)
         tk.Checkbutton(form, text=T("Same as input folder"),
-                       variable=self.c_same, bg=WHITE, fg=FG,
+                       variable=self.c_same, command=self._sync_c_folder,
+                       bg=WHITE, fg=FG,
                        activebackground=PRESSED, selectcolor=FIELD,
                        font=("Segoe UI", 9)).place(x=L, y=82, height=22)
 
         dot(116)
         label(116, T("Save to folder:"))
-        self.c_folder = ttk.Combobox(form, values=[self.folder],
+        self.c_folder = ttk.Combobox(form, values=[self._cv_folder,
+                                                   self.folder],
                                      font=("Segoe UI", 10))
-        self.c_folder.set(self.folder)
         self.c_folder.place(x=L, y=116, width=HALF, height=30)
         self._combo_icon(self.c_folder, "folder.png")
         aux(116, T("Browse..."), lambda: self.browse(self.c_folder))
+        for ev in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+            self.c_folder.bind(ev, lambda e: self._c_folder_edited())
+        self._sync_c_folder()
 
         by = 164
         tk.Button(form, text=T("Convert Now"), fg="white", bg=BLUE,
@@ -952,6 +1159,7 @@ class App:
         dlg.title(T("Advanced conversion options"))
         dlg.configure(bg=WHITE)
         dlg.resizable(False, False)
+        self._center_over_root(dlg)
         g = ttk.Frame(dlg, padding=12)
         g.pack(fill="both", expand=True)
         ttk.Label(g, text=T("Audio bitrate:")).grid(row=0, column=0, sticky="w")
@@ -975,9 +1183,165 @@ class App:
         extra = ttk.Entry(g, width=30)
         extra.insert(0, self.cfg.get("extra", ""))
         extra.grid(row=3, column=1, sticky="w", padx=6)
+        # "?" right of the field: cheat-sheet of useful ffmpeg arguments.
+        ttk.Button(g, text="?", width=3, command=lambda: self._ffmpeg_help(
+            dlg)).grid(row=3, column=2, sticky="w")
         ttk.Button(g, text=T("OK"), command=lambda: self._save_advanced(
             dlg, abr.get(), preset.get(), crf.get(), extra.get())).grid(
             row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+    # Cheat-sheet contents per language: (section, [(args, description)])
+    # Extra args are appended by core right before the output file, so the
+    # sheet documents options in exactly that position.
+    FFMPEG_HELP = {
+        "ru": (
+            "Сюда добавляются аргументы ffmpeg — они вставляются в команду "
+            "перед файлом вывода. Строку можно выделить и скопировать (Ctrl+C).",
+            [
+                ("Без перекодирования (быстро, без потерь)", [
+                    ("-c copy", "смена контейнера (remux), например MKV → MP4"),
+                    ("-c:v copy", "видео как есть, перекодировать только аудио"),
+                    ("-c:a copy", "аудио как есть, перекодировать только видео"),
+                ]),
+                ("Видео: кодек и качество", [
+                    ("-c:v libx264", "кодировать видео в H.264 (универсально)"),
+                    ("-c:v libx265", "H.265/HEVC — примерно вдвое меньше файл, "
+                     "но дольше кодировать"),
+                    ("-c:v libvpx-vp9", "VP9 — лучший выбор для WEBM"),
+                    ("-crf 18", "качество 0–51, меньше = лучше; 18 ≈ «без "
+                     "потерь для глаза», 23 — по умолчанию"),
+                    ("-preset slow", "скорость x264/x265: ultrafast … veryslow, "
+                     "медленнее = сильнее сжатие"),
+                    ("-b:v 4M", "постоянный битрейт видео (ABR), вместо crf"),
+                ]),
+                ("Аудио", [
+                    ("-c:a aac -b:a 192k", "аудио AAC 192 кбит/с"),
+                    ("-c:a libmp3lame -b:a 320k", "аудио MP3 320 кбит/с"),
+                    ("-ar 48000", "частота дискретизации аудио"),
+                    ("-an", "полностью убрать аудио"),
+                ]),
+                ("Размер, кадры, обрезка", [
+                    ("-vf scale=1920:1080", "изменить разрешение "
+                     "(1280:720, 3840:2160, …)"),
+                    ("-r 60", "частота кадров"),
+                    ("-ss 00:01:30 -to 00:02:45", "вырезать фрагмент "
+                     "между временем начала и конца"),
+                    ("-t 60", "брать только N секунд от начала"),
+                ]),
+                ("Прочее", [
+                    ("-sn", "отключить дорожки субтитров"),
+                    ("-map 0:v:0 -map 0:a:0", "взять первую видеодорожку и "
+                     "первую аудиодорожку"),
+                    ("-movflags +faststart", "MP4 для просмотра по сети: "
+                     "заголовок в начало файла"),
+                    ("-metadata title=\"Имя\"", "записать заголовок в файл"),
+                ]),
+            ]),
+        "en": (
+            "These are extra ffmpeg arguments — they are inserted into the "
+            "command right before the output file. Select a line and press "
+            "Ctrl+C to copy it.",
+            [
+                ("Without re-encoding (fast, lossless)", [
+                    ("-c copy", "change container (remux), e.g. MKV → MP4"),
+                    ("-c:v copy", "keep video, re-encode only audio"),
+                    ("-c:a copy", "keep audio, re-encode only video"),
+                ]),
+                ("Video: codec & quality", [
+                    ("-c:v libx264", "encode video to H.264 (most compatible)"),
+                    ("-c:v libx265", "H.265/HEVC — about half the size, "
+                     "but slower to encode"),
+                    ("-c:v libvpx-vp9", "VP9 — best choice for WEBM"),
+                    ("-crf 18", "quality 0–51, lower = better; 18 ≈ visually "
+                     "lossless, 23 is the default"),
+                    ("-preset slow", "x264/x265 speed: ultrafast … veryslow, "
+                     "slower = better compression"),
+                    ("-b:v 4M", "constant video bitrate (ABR) instead of crf"),
+                ]),
+                ("Audio", [
+                    ("-c:a aac -b:a 192k", "AAC audio at 192 kbit/s"),
+                    ("-c:a libmp3lame -b:a 320k", "MP3 audio at 320 kbit/s"),
+                    ("-ar 48000", "audio sample rate"),
+                    ("-an", "remove audio entirely"),
+                ]),
+                ("Size, frame rate, trimming", [
+                    ("-vf scale=1920:1080", "change resolution "
+                     "(1280:720, 3840:2160, …)"),
+                    ("-r 60", "frame rate"),
+                    ("-ss 00:01:30 -to 00:02:45", "cut the fragment between "
+                     "two timestamps"),
+                    ("-t 60", "keep only N seconds from the start"),
+                ]),
+                ("Other", [
+                    ("-sn", "drop subtitle tracks"),
+                    ("-map 0:v:0 -map 0:a:0", "take the first video and the "
+                     "first audio track"),
+                    ("-movflags +faststart", "MP4 for web streaming: move the "
+                     "index to the file start"),
+                    ("-metadata title=\"Name\"", "write a title into the file"),
+                ]),
+            ]),
+    }
+
+    def _ffmpeg_help(self, master):
+        """Non-modal cheat-sheet of extra ffmpeg arguments.  Transient to
+        the Advanced dialog so it floats above the app, but there is no
+        grab_set(): the user can drag it aside and keep filling the form."""
+        win = getattr(self, "_ffmpeg_help_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+        intro, groups = self.FFMPEG_HELP["ru" if i18n.LANG == "ru" else "en"]
+        dlg = tk.Toplevel(self.root)
+        self._ffmpeg_help_win = dlg
+        self._titlebar(dlg)
+        dlg.title(T("ffmpeg arguments help"))
+        dlg.configure(bg=WHITE)
+        body = tk.Frame(dlg, bg=WHITE)
+        body.pack(fill="both", expand=True, padx=10, pady=(8, 10))
+        txt = tk.Text(body, width=62, height=26, bd=1, relief="solid",
+                      bg=FIELD, fg=FG, insertbackground=FG,
+                      font=("Consolas", 9), wrap="none",
+                      selectbackground=BLUE, selectforeground=WHITE)
+        sb = ttk.Scrollbar(body, command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.tag_configure("arg", font=("Consolas", 10, "bold"),
+                          foreground=BLUE)
+        txt.tag_configure("sec", font=("Segoe UI", 10, "bold"),
+                          foreground=FG)
+        txt.tag_configure("note", font=("Segoe UI", 9), foreground=SUB)
+        txt.insert("end", intro + "\n\n", "note")
+        for sec, rows in groups:
+            txt.insert("end", sec + "\n", "sec")
+            for args, desc in rows:
+                txt.insert("end", args + "\n", "arg")
+                txt.insert("end", "   " + desc + "\n", "note")
+            txt.insert("end", "\n")
+        # Read-only but selectable: block plain typing, keep Ctrl+C / arrows.
+        def _ro(e):
+            if e.state & 0x0004:  # Ctrl held → allow copy & navigation
+                return
+            return "break"
+        txt.bind("<Key>", _ro)
+        for seq in ("<Control-v>", "<Control-V>", "<Control-x>", "<Control-X>",
+                    "<Control-BackSpace>"):
+            txt.bind(seq, lambda e: "break")
+        # Same monitor as the app, to the right of the Advanced dialog
+        # (or its left if the screen edge is close); native caption gives
+        # the close cross; the window stays movable and above the app.
+        dlg.transient(master)
+        dlg.update_idletasks()
+        w, h = 640, 470
+        mx = master.winfo_rootx() + master.winfo_width() + 12
+        my = master.winfo_rooty()
+        if mx + w > dlg.winfo_screenwidth() - 8:
+            mx = max(8, master.winfo_rootx() - w - 12)
+        my = max(8, min(my, dlg.winfo_screenheight() - h - 40))
+        dlg.geometry(f"{w}x{h}+{mx}+{my}")
+        dlg.lift()
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
 
     def _save_advanced(self, dlg, abr, preset, crf, extra):
         self.cfg.update({"abr": abr, "preset": preset, "crf": crf,
@@ -988,6 +1352,7 @@ class App:
     def _set_src(self, value):
         self.c_src.delete(0, "end")
         self.c_src.insert(0, value)
+        self._sync_c_folder()
 
     def browse_source(self):
         f = filedialog.askopenfilename(
@@ -1407,7 +1772,11 @@ class App:
             messagebox.showinfo(APP_NAME, T("Enter a URL first."))
             return
         self._remember(url)
-        t = self._new_task("download", url, self.d_folder.get() or self.folder)
+        folder = ensure_download_folder(
+            self.d_folder.get() or self.folder, self.folder)
+        self.d_folder.set(folder)
+        self.folder = folder
+        t = self._new_task("download", url, folder)
         q = self.d_quality.current()
         if self.d_what.current() == 0:
             fmt = core.video_fmt(core.VIDEO_QUALITIES[q][1])
@@ -1437,8 +1806,15 @@ class App:
         if not src or not os.path.exists(src):
             messagebox.showinfo(APP_NAME, T("Choose an existing source file."))
             return
-        folder = self.folder if self.c_same.get() else \
-            self.c_folder.get() or self.folder
+        src_dir = os.path.dirname(os.path.normpath(src))
+        folder = src_dir if self.c_same.get() else \
+            self.c_folder.get() or self._cv_folder
+        folder = ensure_download_folder(folder, self.folder)
+        self.c_folder.set(folder)
+        if not self.c_same.get():
+            self._cv_folder = folder
+            self.cfg["convert_folder"] = folder
+            self._save_config()
         t = self._new_task("convert", src, folder)
         group = core.CONTAINERS[self.c_container.get()][1]
         t.cv_opts = {"container": core.CONTAINERS[self.c_container.get()][0],
@@ -1546,13 +1922,12 @@ class App:
         folder = filedialog.askdirectory(initialdir=self.folder,
                                          title=T("Download folder"))
         if folder:
-            self.folder = os.path.normpath(folder)
+            self.folder = ensure_download_folder(folder)
             self.d_folder.set(self.folder)
-            self.c_folder.set(self.folder)
             self._save_config()
 
     def open_folder(self):
-        os.makedirs(self.folder, exist_ok=True)
+        self.folder = ensure_download_folder(self.folder)
         os.startfile(self.folder)
 
     # ------------------------------------------------------------- refresh
@@ -1702,6 +2077,7 @@ class App:
         dlg.resizable(False, False)
         W = 620
         dlg.geometry(f"{W}x560")
+        self._center_over_root(dlg, W, 560)
 
         def title(i, s):
             tk.Label(dlg, text=s, bg=WHITE, fg=BLUE,

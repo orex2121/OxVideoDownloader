@@ -6,5 +6,7 @@
   ]
  },
  "Link": "Link",
- "Open": "Open"
+ "Open": "Open",
+ "ffmpeg arguments help": "ffmpeg arguments help",
+ "This folder cannot be written to: Windows protects the root of the C: drive. Pick or create a normal folder (for example C:\\Video).": "This folder cannot be written to: Windows protects the root of the C: drive. Pick or create a normal folder (for example C:\\Video)."
 }

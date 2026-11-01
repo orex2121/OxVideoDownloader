@@ -2,11 +2,12 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-set "PYTHON_VERSION=3.12.10"
+set "PYTHON_VERSION=3.12.11"
+set "PBS_TAG=20250612"
 set "PYTHON_DIR=%CD%\python"
 set "PYTHON_EXE=%PYTHON_DIR%\python.exe"
-set "INSTALLER=%TEMP%\oxvideodownloader-python-%PYTHON_VERSION%-amd64.exe"
-set "PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/python-%PYTHON_VERSION%-amd64.exe"
+set "ARCHIVE=%TEMP%\oxvideodownloader-python-%PYTHON_VERSION%.tar.gz"
+set "PYTHON_URL=https://github.com/astral-sh/python-build-standalone/releases/download/%PBS_TAG%/cpython-%PYTHON_VERSION%+%PBS_TAG%-x86_64-pc-windows-msvc-install_only.tar.gz"
 
 echo.
 echo OxVideoDownloader portable environment setup
@@ -15,19 +16,21 @@ echo.
 
 if exist "%PYTHON_EXE%" goto install_packages
 
-echo [1/3] Downloading Python %PYTHON_VERSION% x64...
+echo [1/3] Downloading portable Python %PYTHON_VERSION% x64...
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '%PYTHON_URL%' -OutFile '%INSTALLER%'"
+  "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '%PYTHON_URL%' -OutFile '%ARCHIVE%'"
 if errorlevel 1 goto download_failed
 
-echo [2/3] Installing Python into the application folder...
-start "" /wait "%INSTALLER%" /quiet InstallAllUsers=0 TargetDir="%PYTHON_DIR%" ^
-  AssociateFiles=0 Shortcuts=0 Include_doc=0 Include_debug=0 Include_dev=0 ^
-  Include_launcher=0 Include_pip=1 Include_test=0 Include_tools=0 ^
-  Include_tcltk=1 Include_symbols=0 PrependPath=0
+rem The archive is a self-contained CPython: extract it as-is, no installer,
+rem no registry. (The python.org setup .exe is a registered system bundle:
+rem a second run is a no-op that silently places no files in a new folder.)
+echo [2/3] Extracting Python into the application folder...
+tar.exe -xzf "%ARCHIVE%" -C "%CD%"
 if errorlevel 1 goto python_failed
 if not exist "%PYTHON_EXE%" goto python_failed
-del /q "%INSTALLER%" >nul 2>&1
+del /q "%ARCHIVE%" >nul 2>&1
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+  "Get-ChildItem -LiteralPath '%PYTHON_DIR%' -Recurse -Filter *.pdb -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue" >nul 2>&1
 
 :install_packages
 echo [3/3] Installing application dependencies...
@@ -55,7 +58,7 @@ goto failed
 
 :python_failed
 echo.
-echo ERROR: Python could not be installed into "%PYTHON_DIR%".
+echo ERROR: Python could not be extracted into "%PYTHON_DIR%".
 goto failed
 
 :packages_failed
