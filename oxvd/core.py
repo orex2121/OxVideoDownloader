@@ -1,6 +1,7 @@
 """OxVideoDownloader core: task model, yt-dlp download worker, ffmpeg convert worker."""
 
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -125,8 +126,8 @@ def human_size(nbytes):
     if not nbytes:
         return ""
     n = float(nbytes)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if n < 1024 or unit == "TiB":
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return ""
@@ -281,6 +282,7 @@ class Task:
         self.duration_text = ""
         self.size_text = ""
         self.note = ""
+        self.notes = ""             # free-form user note (Notes column)
         self.thumb_path = None
         self.final_path = None
         self.item = ""              # playlist counter
@@ -300,7 +302,9 @@ class Task:
         if self.total_bytes:
             done = human_size(self.downloaded or 0)
             tot = human_size(self.total_bytes)
-            return f"{done} / {tot}" if done else tot
+            if not done or done == tot:
+                return tot
+            return f"{done} / {tot}"
         return ""
 
     def status_display(self):
@@ -482,6 +486,14 @@ def _image_bytes_ok(data):
     return bool(data) and len(data) >= 100 and _image_head_ok(data[:12])
 
 
+def local_thumb_id(path):
+    """Stable thumbnail-cache id for a local file: converted files and
+    any other task without a yt-dlp video id derive their preview cache
+    key from the finished file's path this way."""
+    key = os.path.normcase(os.path.abspath(path)).encode("utf-8", "replace")
+    return "local-" + hashlib.md5(key).hexdigest()[:16]
+
+
 def thumb_cached(thumb_dir, vid):
     """True only if a *usable* preview image for this video id is on disk.
 
@@ -618,7 +630,7 @@ def _make_hook(t, thumb_dir):
                 t.total_bytes = total
             t.downloaded = got
             spd = d.get("speed")
-            t.speed = f"{spd / 1048576:.2f} MiB/s" if spd else ""
+            t.speed = f"{spd / 1048576:.2f} MB/s" if spd else ""
             t.eta = human_time(d.get("eta"))
             idx, cnt = info.get("playlist_index"), info.get("playlist_count")
             t.item = f"{idx}/{cnt}" if idx and cnt else ""
@@ -716,6 +728,13 @@ def run_convert(t, cfg):
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(src))[0]
     out = os.path.join(out_dir, f"{base}.{container}")
+    # Same container + same folder makes the output the very file ffmpeg is
+    # reading: -y would truncate the source, and the failure cleanup would
+    # then delete it (data loss).  Convert through a temp file and swap it
+    # into place only on success, so re-compressing "in place" is safe.
+    final_out = out
+    if os.path.normcase(os.path.abspath(out)) == os.path.normcase(os.path.abspath(src)):
+        out = os.path.join(out_dir, base + ".oxvd-tmp." + container)
     group = CONTAINER_GROUP.get(container, "video")
     cmd = [ffmpeg, "-y", "-nostdin", "-loglevel", "error",
            "-progress", "pipe:1", "-nostats", "-i", src]
@@ -723,10 +742,10 @@ def run_convert(t, cfg):
         vcodec = VIDEO_CODECS.get(o.get("vcodec", "H.264"), "libx264")
         cmd += ["-c:v", vcodec]
         if vcodec == "libx264":
-            cmd += ["-preset", o.get("preset", "medium"), "-crf",
+            cmd += ["-preset", o.get("preset", "faster"), "-crf",
                     str(o.get("crf", 20))]
         elif vcodec == "libx265":
-            cmd += ["-preset", o.get("preset", "medium"), "-crf",
+            cmd += ["-preset", o.get("preset", "faster"), "-crf",
                     str(o.get("crf", 24))]
         acodec = AUDIO_DEFAULT.get(container, ("aac", ["-c:a", "aac"]))[1]
         cmd += [a.replace("{abr}", o.get("abr", "192k")) for a in acodec]
@@ -763,6 +782,12 @@ def run_convert(t, cfg):
             t.status = "Canceled"
             _drop(out)
         elif proc.returncode == 0 and os.path.exists(out):
+            if out != final_out:
+                # Swap the temp file into the original name; a locked source
+                # raises and falls into the except below (temp dropped,
+                # source untouched).
+                os.replace(out, final_out)
+                out = final_out
             t.status = "Done"
             t.pct = 100.0
             t.final_path = out

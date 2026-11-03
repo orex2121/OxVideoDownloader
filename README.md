@@ -34,12 +34,14 @@
 
 ### ✨ Features
 
-- **Engine & Queue Management:** Powered by `yt-dlp` and `FFmpeg`. Downloads single videos, audio tracks, and entire playlists from a link. Features a multi-task queue displaying thumbnails, source, duration, file size, status, live transfer speed, and ETA per task, with full controls (`Start All`, `Pause All`, `Restart`, `Remove`, `Remove Completed`).
+- **Engine & Queue Management:** Powered by `yt-dlp` and `FFmpeg`. Downloads single videos, audio tracks, and entire playlists from a link. Features a multi-task queue displaying thumbnails, source, duration, file size, status, live transfer speed, and ETA per task, with full controls (`Start`, `Start All`, `Pause All`, `Restart`, `Remove`, `Remove Completed`) and per-task selection checkboxes to act on a chosen subset.
+- **Task Board Helpers:** A per-task **Notes** column, a header **search** box that instantly filters tasks by notes, file name, source link or destination path, and smooth mouse-wheel scrolling.
+- **Import / Export Tasks:** The gear menu writes the entire task list — notes, status, sizes, durations, links and selection state — to a JSON file (`Export tasks`) and loads it back (`Import tasks`). Files with unknown or missing fields still load, so your task lists survive future app updates.
 - **Quality Presets:**
   - **Video:** `Best`, `2160p` (4K), `1440p`, `1080p` (Full HD), `720p` (HD), `480p`, `360p`.
   - **Audio:** `Best`, `~256 kbps`, `~128 kbps`.
 - **Convert-While-Downloading:** Remux or transcode on the fly into `MP4`, `MKV`, `WEBM`, `MOV`, or `AVI` containers using `H.264`, `H.265 (HEVC)`, `VP9`, or `AV1` codecs. Supports concurrent segment downloading and browser sign-in cookies for age-restricted or member-only videos.
-- **Local Media Converter (`Convert` Tab):** Convert local media files between `MP4`, `MKV`, `WEBM`, `MOV`, `AVI`, `MP3`, `M4A`, `WAV`, and `FLAC`. Includes advanced controls for CRF quality and audio bitrate, with options to convert **Now** or queue for **Later**.
+- **Local Media Converter (`Convert` Tab):** Convert local media files between `MP4`, `MKV`, `WEBM`, `MOV`, `AVI`, `MP3`, `M4A`, `WAV`, and `FLAC`. Advanced options live right on the tab — CRF quality, x264 CPU preset, audio bitrate and extra FFmpeg arguments (with a `?` cheat-sheet) — each explained by a hover tooltip; convert **Now** or queue for **Later**.
 - **100% Portable:** Zero installation and no registry entries—the entire application resides in a single folder and runs directly from a USB stick. `FFmpeg` binaries are not committed to the repository; on first launch, the app checks the local `ffmpeg\` folder and downloads them automatically via a cancelable progress dialog.
 - **Customization & Settings:** 5 interface languages (English, Russian, German, Spanish, French), Light and dark **Obsidian Copper** themes, automatic retry for failed downloads, and custom download directory selection.
 
@@ -112,12 +114,14 @@ The updater downloads the latest files from the `main` branch of [the GitHub rep
 
 ### ✨ Возможности
 
-- **Движок и управление очередью:** Работает на базе `yt-dlp` и `FFmpeg`. Скачивает одиночные видео, аудиодорожки и целые плейлисты по ссылке. Многозадачная очередь отображает превью, источник, длительность, размер файла, статус, текущую скорость загрузки и оставшееся время (ETA) для каждой задачи с полным набором элементов управления (`Start All`, `Pause All`, `Restart`, `Remove`, `Remove Completed`).
+- **Движок и управление очередью:** Работает на базе `yt-dlp` и `FFmpeg`. Скачивает одиночные видео, аудиодорожки и целые плейлисты по ссылке. Многозадачная очередь отображает превью, источник, длительность, размер файла, статус, текущую скорость загрузки и оставшееся время (ETA) для каждой задачи с полным набором элементов управления (`Start`, `Start All`, `Pause All`, `Restart`, `Remove`, `Remove Completed`) и чекбоксами для выборочной работы с выделенными задачами.
+- **Удобства списка задач:** Колонка **Заметки** для каждой задачи, поле **поиска** в шапке, мгновенно фильтрующее список по заметкам, имени файла, ссылке и пути сохранения, и плавная прокрутка списка колесом мыши.
+- **Импорт / экспорт задач:** Меню шестерёнки сохраняет весь список задач в JSON-файл (`Экспорт задач`) — заметки, статусы, размеры, длительности, ссылки и состояние выделения — и загружает его обратно (`Импорт задач`). Файлы с неизвестными или отсутствующими полями загружаются без ошибок, поэтому списки задач переживают будущие обновления приложения.
 - **Пресеты качества:**
   - **Видео:** `Best`, `2160p` (4K), `1440p`, `1080p` (Full HD), `720p` (HD), `480p`, `360p`.
   - **Аудио:** `Best`, `~256 kbps`, `~128 kbps`.
 - **Конвертация при скачивании:** Ремультиплексирование (remux) или перекодирование «на лету» в контейнеры `MP4`, `MKV`, `WEBM`, `MOV` или `AVI` с использованием кодеков `H.264`, `H.265 (HEVC)`, `VP9` или `AV1`. Поддерживается многопоточная загрузка сегментов и использование файлов cookie из браузера для видео с возрастными ограничениями или закрытым доступом по подписке.
-- **Конвертер локальных файлов (вкладка `Convert`):** Конвертация локальных медиафайлов между форматами `MP4`, `MKV`, `WEBM`, `MOV`, `AVI`, `MP3`, `M4A`, `WAV` и `FLAC`. Включает гибкие настройки качества CRF и битрейта аудио с возможностью запустить конвертацию сразу (**Now**) или добавить в очередь на потом (**Later**).
+- **Конвертер локальных файлов (вкладка `Convert`):** Конвертация локальных медиафайлов между форматами `MP4`, `MKV`, `WEBM`, `MOV`, `AVI`, `MP3`, `M4A`, `WAV` и `FLAC`. Расширенные настройки прямо на вкладке — качество CRF, пресет скорости x264, битрейт аудио и дополнительные аргументы FFmpeg (со справкой `?`) — каждая с всплывающей подсказкой при наведении; запуск сразу (**Now**) или в очередь на потом (**Later**).
 - **100% портативность:** Не требует установки и не оставляет записей в реестре — всё приложение находится в одной папке и может запускаться напрямую с USB-накопителя. Бинарные файлы `FFmpeg` не включены в репозиторий: при первом запуске приложение проверяет локальную папку `ffmpeg\` и автоматически скачивает их через окно прогресса с возможностью отмены.
 - **Персонализация и настройки:** 5 языков интерфейса (английский, русский, немецкий, испанский, французский), светлая и тёмная темы оформления (**Obsidian Copper**), автоматический повтор при сбоях загрузки и выбор пользовательской папки для сохранения файлов.
 

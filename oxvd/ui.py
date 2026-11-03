@@ -157,6 +157,8 @@ def norm_url(url):
     return u
 
 BLUE = FG = BG = WHITE = HEAD = HEADFG = BAR = SEP = SUB = THUMB = ""
+# theme-independent highlight for section headings on the Convert tab
+SKYBLUE = "#57A6FF"
 RED = GREEN = PRESSED = FIELD = "#000000"
 
 # Popular hosters this app can download from (yt-dlp extractors).
@@ -224,6 +226,7 @@ class App:
         self.ffmpeg = _tool("ffmpeg.exe") if os.name == "nt" else _tool("ffmpeg")
         self.ffprobe = _tool("ffprobe.exe") if os.name == "nt" else _tool("ffprobe")
         self.tasks = []
+        self.selected_ids = set()   # row checkboxes -> Start/Remove targets
         self._lock = threading.Lock()
         os.makedirs(THUMB_DIR, exist_ok=True)
         self._thumb_index = self._load_thumb_index()
@@ -241,9 +244,11 @@ class App:
                 pass
 
         self.root = tk.Tk()
-        self.root.title(f"{APP_NAME} {APP_VERSION}")
+        self.root.title(APP_NAME)
         self._titlebar(self.root)
-        self._apply_geometry(self.cfg.get("geometry", "931x539"))
+        # 850x756 fits the Tasks columns (incl. Notes); a user-resized
+        # window is restored from cfg["geometry"], saved on every change
+        self._apply_geometry(self.cfg.get("geometry", "850x756"))
         if self.cfg.get("maximized"):
             try:
                 self.root.state("zoomed")
@@ -288,6 +293,7 @@ class App:
         }
         self.show_tab("Tasks")
         self._style_buttons(self.root)
+        self._install_file_drop()
         self._load_tasks()
         self._ensure_ffmpeg()
         self._saved_sig = None
@@ -395,19 +401,23 @@ class App:
 
     def _combo_icon(self, combo, name):
         combo.configure(style="Icon.TCombobox")
-        self._icon_overlays.append((combo, name))
+        self._icon_overlays.append([combo, name, None])
 
     def _place_icons(self):
         self.root.update_idletasks()
-        for combo, name in self._icon_overlays:
+        for rec in self._icon_overlays:
+            combo, name, lbl = rec
             img = self._img(name)
             if img is None:
                 continue
-            x = combo.winfo_x() + 4
-            y = combo.winfo_y() + (combo.winfo_height() - 16) // 2
-            lbl = tk.Label(combo.master, image=img, bd=0, bg=WHITE)
-            lbl._oxvd_icon = id(combo)
-            lbl.place(x=x, y=y)
+            if lbl is None:
+                lbl = tk.Label(combo.master, image=img, bd=0, bg=WHITE)
+                lbl._oxvd_icon = id(combo)
+                rec[2] = lbl
+            # re-runs on every tab relayout, so the icon always rides the
+            # combobox even before its page was first shown
+            lbl.place(x=combo.winfo_x() + 4,
+                      y=combo.winfo_y() + (combo.winfo_height() - 16) // 2)
             lbl.lift(combo)
 
     # ------------------------------------------------------------- config
@@ -451,6 +461,7 @@ class App:
                  "pct": t.pct, "downloaded": t.downloaded,
                  "total_bytes": t.total_bytes,
                  "duration_text": t.duration_text, "note": t.note,
+                 "notes": t.notes,
                  "thumb_path": t.thumb_path, "final_path": t.final_path,
                  "item": t.item, "dl_opts": t.dl_opts,
                  "cv_opts": t.cv_opts} for t in tasks]
@@ -484,6 +495,7 @@ class App:
                 pass
             t.title = r.get("title") or ""
             t.note = "" if folder_repaired else (r.get("note") or "")
+            t.notes = r.get("notes") or ""
             t.item = r.get("item") or ""
             t.duration_text = r.get("duration_text") or ""
             t.thumb_path = r.get("thumb_path")
@@ -503,6 +515,121 @@ class App:
             with self._lock:
                 self.tasks.append(t)
             self._make_row(t)
+
+    # ------------------------------------------------- gear: Import/Export
+    # Import reads a JSON file back into the list, Export writes the list
+    # out to a file the user picks.
+    def _task_row_dict(self, t):
+        """Full snapshot of one task: every stored parameter (notes, status,
+        size, duration, file / resource / cover paths) plus the selection
+        mark. Unknown future fields can be appended here without breaking
+        the reader, which ignores anything it doesn't know."""
+        return {
+            "kind": t.kind,
+            "source": t.source,            # link to the resource
+            "folder": t.folder,
+            "title": t.title,
+            "status": "Paused" if t.status in
+            ("Downloading", "Processing", "Stopping") else t.status,
+            "pct": t.pct,
+            "downloaded": t.downloaded,    # size, bytes
+            "total_bytes": t.total_bytes,
+            "size_text": t.size_text,
+            "duration_text": t.duration_text,
+            "note": t.note,
+            "notes": t.notes,              # Notes column
+            "final_path": t.final_path,    # link to the downloaded file
+            "thumb_path": t.thumb_path,    # cover image
+            "item": t.item,
+            "dl_opts": t.dl_opts,
+            "cv_opts": t.cv_opts,
+            "selected": t.id in self.selected_ids,
+        }
+
+    def _task_from_dict(self, r):
+        """Lenient reader: fills in defaults for missing keys and silently
+        ignores keys this version doesn't know, so files written by newer
+        builds still load."""
+        kind = r.get("kind")
+        if kind not in ("download", "convert"):
+            kind = "download"
+        folder = ensure_download_folder(str(r.get("folder") or self.folder),
+                                        self.folder)
+        t = core.Task(kind, str(r.get("source") or ""), folder)
+        t.title = str(r.get("title") or "")
+        t.status = r.get("status") if r.get("status") in (
+            "Queued", "Paused", "Done", "Failed", "Canceled") else "Queued"
+        t.pct = r.get("pct") if isinstance(r.get("pct"), (int, float)) else None
+        t.downloaded = r.get("downloaded") \
+            if isinstance(r.get("downloaded"), (int, float)) else None
+        t.total_bytes = r.get("total_bytes") \
+            if isinstance(r.get("total_bytes"), (int, float)) else None
+        t.size_text = str(r.get("size_text") or "")
+        t.duration_text = str(r.get("duration_text") or "")
+        t.note = str(r.get("note") or "")
+        t.notes = str(r.get("notes") or "")
+        t.final_path = r.get("final_path") or None
+        t.thumb_path = r.get("thumb_path") or None
+        t.item = r.get("item") or ""
+        t.dl_opts = r.get("dl_opts") if isinstance(r.get("dl_opts"), dict) else {}
+        t.cv_opts = r.get("cv_opts") if isinstance(r.get("cv_opts"), dict) else {}
+        return t
+
+    def _save_tasks_json(self):
+        path = filedialog.asksaveasfilename(
+            title=T("Export"), defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            initialfile=APP_NAME.lower() + "_tasks.json")
+        if not path:
+            return
+        with self._lock:
+            tasks = list(self.tasks)
+        rows = [self._task_row_dict(t) for t in tasks]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rows, f, indent=1, ensure_ascii=False)
+        except OSError as e:
+            messagebox.showerror(APP_NAME, T("Could not save the file:")
+                                 + " " + str(e))
+            return
+        self.lbl_status.config(text=T("Tasks saved") + ": "
+                               + os.path.basename(path))
+
+    def _load_tasks_json(self):
+        path = filedialog.askopenfilename(
+            title=T("Import"), filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                rows = json.load(f)
+        except Exception:
+            messagebox.showerror(APP_NAME, T("This file cannot be read "
+                                             "as a tasks list."))
+            return
+        if isinstance(rows, dict):          # tolerate a wrapper object
+            rows = rows.get("tasks", [])
+        if not isinstance(rows, list):
+            messagebox.showerror(APP_NAME, T("This file cannot be read "
+                                             "as a tasks list."))
+            return
+        loaded = 0
+        for r in rows:
+            if not isinstance(r, dict) or not str(r.get("source") or ""):
+                continue
+            t = self._task_from_dict(r)
+            with self._lock:
+                self.tasks.append(t)
+            if r.get("selected"):
+                self.selected_ids.add(t.id)
+            self._make_row(t)
+            loaded += 1
+        if loaded:
+            self._save_tasks()
+            self.lbl_status.config(text=T("Tasks loaded") + ": "
+                                   + str(loaded))
+        else:
+            messagebox.showinfo(APP_NAME, T("No tasks found in the file."))
 
     def _on_close(self):
         self._remember_window()
@@ -554,7 +681,7 @@ class App:
         self.tab_frames = {}
         for i, name in enumerate(("Tasks", "Download", "Convert")):
             f = tk.Frame(strip, bg=BG)
-            f.place(x=12 + i * 130, y=0, relheight=1)
+            f.pack(side="left", fill="y")
             b = tk.Button(f, text=T(name), bd=0, bg=BG, fg=FG,
                           activebackground=PRESSED,
                           font=("Segoe UI", 11), cursor="hand2",
@@ -578,16 +705,54 @@ class App:
                 activebackground=PRESSED, font=("Segoe UI Symbol", 15),
                 direction="below")
         menu = self._themed_menu(self.hamburger)
+        # every entry carries a small grey icon; compound=left keeps the
+        # label beside it even though the menu is dark
+        def mimg(name):
+            img = self._img(name)
+            return {} if img is None else {"image": img, "compound": "left"}
         menu.add_command(label=T("Change download folder..."),
-                         command=self.change_folder)
+                         command=self.change_folder,
+                         **mimg("mi_folder_edit.png"))
         menu.add_command(label=T("Open download folder"),
-                         command=self.open_folder)
-        menu.add_command(label=T("Settings"), command=self.open_settings)
+                         command=self.open_folder,
+                         **mimg("mi_folder_open.png"))
+        menu.add_command(label=T("Import tasks"),
+                         command=self._load_tasks_json,
+                         **mimg("mi_import.png"))
+        menu.add_command(label=T("Export tasks"),
+                         command=self._save_tasks_json,
+                         **mimg("mi_export.png"))
+        menu.add_command(label=T("Settings"), command=self.open_settings,
+                         **mimg("mi_settings.png"))
         menu.add_separator()
-        menu.add_cascade(label=T("Video Hosters"), menu=self._hosters_menu())
+        menu.add_cascade(label=T("Video Hosters"),
+                         menu=self._hosters_menu(), **mimg("mi_hosters.png"))
         self.hamburger["menu"] = menu
         self.hamburger_menu = menu
         self.hamburger.place(relx=1.0, x=-30, y=8)
+
+        # search box (Tasks): filters the task list by title, link, file
+        # path or note; the faint ✕ appears only while text is present
+        self.search_var = tk.StringVar()
+        self._search_job = None
+        sbox = tk.Frame(strip, bg=FIELD, highlightthickness=1,
+                        highlightbackground=SEP)
+        sbox.place(relx=1.0, x=-286, y=9, width=240, height=26)
+        mag_img = self._img("search.png")
+        mag = tk.Label(sbox, bg=FIELD, bd=0)
+        if mag_img:
+            mag.configure(image=mag_img)
+        mag.place(x=5, y=5)
+        self.search = tk.Entry(sbox, textvariable=self.search_var, bg=FIELD,
+                               fg=FG, insertbackground=FG, bd=0,
+                               highlightthickness=0, font=("Segoe UI", 9))
+        self.search.place(x=26, y=4, width=190, height=18)
+        self.search_clear = tk.Label(sbox, text="✕", bg=FIELD, fg=SUB,
+                                     font=("Segoe UI", 9), cursor="hand2")
+        self.search_clear.bind(
+            "<Button-1>", lambda e: (self.search_var.set(""),
+                                     self.search.focus_set()))
+        self.search_var.trace_add("write", self._search_changed)
 
         bar = tk.Frame(self.root, bg=BAR, height=26)
         bar.pack(side="bottom", fill="x")
@@ -621,33 +786,41 @@ class App:
         p = tk.Frame(self.page_host, bg=WHITE)
         LW, CW, GAP = 170, 700, 12          # labels / fields / pair gap
         HALF = (CW - GAP) // 2
-        X0 = LW + 24                        # shared left edge of all fields
-        FW = X0 + CW + 6
+        X0 = LW + 44                        # shared left edge of all fields
         form = tk.Frame(p, bg=WHITE)
-        form.place(relx=0.5, rely=0.44, anchor="center", width=FW, height=364)
+        # The form spans the whole page; every pair-column field is
+        # re-placed on resize (see relayout), so the tab keeps equal
+        # left/right margins at any window width.
+        form.place(x=0, y=100, anchor="nw", relwidth=1.0, width=0,
+                   height=364)
+        specs = []
+
+        def put(w, x, y, wd=None, h=None, **kw):
+            specs.append((w, x, y, wd, h, kw))
 
         def dot(y):
             tk.Label(form, text="\u25cf", fg=BLUE, bg=WHITE,
-                     font=("Segoe UI", 9)).place(x=2, y=y + 5)
+                     font=("Segoe UI", 9)).place(x=22, y=y + 5)
 
         def label(y, text):
             tk.Label(form, text=text, bg=WHITE, fg=FG, anchor="w",
-                     font=("Segoe UI", 10, "bold")).place(x=24, y=y,
+                     font=("Segoe UI", 10, "bold")).place(x=44, y=y,
                                                           width=LW - 28, height=30)
 
         L, R = X0, X0 + HALF + GAP          # left / right slot of a pair
 
         def aux(y, text, cmd):
-            tk.Button(form, text=text, bd=1, relief="solid", bg=WHITE,
-                      fg=FG, activebackground=PRESSED,
-                      font=("Segoe UI", 9, "bold"), cursor="hand2",
-                      command=cmd).place(x=R, y=y, width=HALF, height=30)
+            b = tk.Button(form, text=text, bd=1, relief="solid", bg=WHITE,
+                          fg=FG, activebackground=PRESSED,
+                          font=("Segoe UI", 9, "bold"), cursor="hand2",
+                          command=cmd)
+            put(b, lambda g: g["R"], y, lambda g: g["HALF"], 30)
 
         dot(0)
         label(0, T("URL:"))
         self.d_url = ttk.Combobox(form, values=self.history,
                                   font=("Segoe UI", 10))
-        self.d_url.place(x=L, y=0, width=HALF, height=30)
+        put(self.d_url, lambda g: g["L"], 0, lambda g: g["HALF"], 30)
         if self.history:
             self.d_url.set(self.history[0])
         aux(0, T("Paste URL"), self.paste_into_url)
@@ -658,9 +831,9 @@ class App:
                                                  T("Download audio")],
                                    state="readonly")
         self.d_what.current(0)
-        self.d_what.place(x=L, y=46, width=HALF, height=30)
+        put(self.d_what, lambda g: g["L"], 46, lambda g: g["HALF"], 30)
         self.d_quality = ttk.Combobox(form, state="readonly")
-        self.d_quality.place(x=R, y=46, width=HALF, height=30)
+        put(self.d_quality, lambda g: g["R"], 46, lambda g: g["HALF"], 30)
         self.d_what.bind("<<ComboboxSelected>>",
                          lambda e: self._fill_quality())
         self._fill_quality()
@@ -676,7 +849,7 @@ class App:
         self.d_folder = ttk.Combobox(form, values=[self.folder],
                                      font=("Segoe UI", 10))
         self.d_folder.set(self.folder)
-        self.d_folder.place(x=L, y=116, width=HALF, height=30)
+        put(self.d_folder, lambda g: g["L"], 116, lambda g: g["HALF"], 30)
         self._combo_icon(self.d_folder, "folder.png")
         aux(116, T("Browse..."), lambda: self.browse(self.d_folder))
         # Remember the typed path right away — not only when a download
@@ -685,18 +858,19 @@ class App:
             self.d_folder.bind(ev, lambda e: self._save_d_folder())
 
         by = 164
-        tk.Button(form, text=T("Download Now"), fg="white", bg=BLUE,
-                  activebackground=shade(BLUE, -0.30),
-                  activeforeground="white", bd=0, cursor="hand2",
-                  font=("Segoe UI", 11, "bold"),
-                  command=lambda: self.add_download(start=True)).place(
-            x=L, y=by, width=HALF, height=44)
-        tk.Button(form, text=T("Download Later"), fg="white", bg=GREEN,
-                  activebackground=shade(GREEN, -0.30),
-                  activeforeground="white", bd=0, cursor="hand2",
-                  font=("Segoe UI", 11, "bold"),
-                  command=lambda: self.add_download(start=False)).place(
-            x=R, y=by, width=HALF, height=44)
+        b_now = tk.Button(form, text=T("Download Now"), fg="white", bg=BLUE,
+                          activebackground=shade(BLUE, -0.30),
+                          activeforeground="white", bd=0, cursor="hand2",
+                          font=("Segoe UI", 11, "bold"),
+                          command=lambda: self.add_download(start=True))
+        put(b_now, lambda g: g["L"], by, lambda g: g["HALF"], 44)
+        b_later = tk.Button(form, text=T("Download Later"), fg="white",
+                            bg=GREEN,
+                            activebackground=shade(GREEN, -0.30),
+                            activeforeground="white", bd=0, cursor="hand2",
+                            font=("Segoe UI", 11, "bold"),
+                            command=lambda: self.add_download(start=False))
+        put(b_later, lambda g: g["R"], by, lambda g: g["HALF"], 44)
 
         self.d_more = tk.BooleanVar(value=False)
         more_box = tk.Frame(form, bg=WHITE, cursor="hand2")
@@ -714,24 +888,26 @@ class App:
         self._pressable([more_box] + more_box.winfo_children())
 
         self.d_moreframe = tk.Frame(form, bg=WHITE)
-        tk.Label(self.d_moreframe, text=T("Sign-in cookies:"), bg=WHITE,
-                 fg=FG, font=("Segoe UI", 9)).place(x=L, y=4, width=HALF,
-                                                    anchor="w")
+        lab_ck = tk.Label(self.d_moreframe, text=T("Sign-in cookies:"),
+                          bg=WHITE, fg=FG, font=("Segoe UI", 9))
+        put(lab_ck, lambda g: g["L"], 4, lambda g: g["HALF"], None,
+            anchor="w")
         self.d_cookies = ttk.Combobox(
             self.d_moreframe, state="readonly",
             values=["none", "chrome", "edge", "firefox", "brave"])
         self.d_cookies.set(self.cookies_browser or "none")
-        self.d_cookies.place(x=L, y=26, width=HALF, height=28)
-        tk.Label(self.d_moreframe, text=T("Concurrent segments:"), bg=WHITE,
-                 fg=FG, font=("Segoe UI", 9)).place(x=R, y=4, width=HALF,
-                                                    anchor="w")
+        put(self.d_cookies, lambda g: g["L"], 26, lambda g: g["HALF"], 28)
+        lab_seg = tk.Label(self.d_moreframe, text=T("Concurrent segments:"),
+                           bg=WHITE, fg=FG, font=("Segoe UI", 9))
+        put(lab_seg, lambda g: g["R"], 4, lambda g: g["HALF"], None,
+            anchor="w")
         self.d_segments = tk.Spinbox(self.d_moreframe, from_=1, to=16,
                                      bg=FIELD, fg=FG, highlightthickness=1,
                                      highlightbackground=SEP,
                                      font=("Segoe UI", 10))
         self.d_segments.delete(0, "end")
         self.d_segments.insert(0, "4")
-        self.d_segments.place(x=X0 + CW - 70, y=26, width=70, height=28)
+        put(self.d_segments, lambda g: g["X0"] + g["CW"] - 70, 26, 70, 28)
 
         # row 2: auto re-encode the download after it finishes. The choice is
         # remembered across restarts and saved the moment it is toggled.
@@ -751,9 +927,10 @@ class App:
         self.d_cv_cont = ttk.Combobox(self.d_moreframe, state="readonly",
                                       values=list(core.CONTAINERS))
         self.d_cv_cont.set(self.cfg.get("dl_container", "MP4 .mp4"))
-        self.d_cv_cont.place(x=L + 175, y=58, width=HALF - 175, height=28)
+        put(self.d_cv_cont, lambda g: g["L"] + 175, 58,
+            lambda g: g["HALF"] - 175, 28)
         self.d_cv_codec = ttk.Combobox(self.d_moreframe, state="readonly")
-        self.d_cv_codec.place(x=R, y=58, width=HALF, height=28)
+        put(self.d_cv_codec, lambda g: g["R"], 58, lambda g: g["HALF"], 28)
         def _cv_choice(_e=None):
             self.cfg["dl_container"] = self.d_cv_cont.get()
             self.cfg["dl_codec"] = self.d_cv_codec.get()
@@ -765,8 +942,28 @@ class App:
         self._fill_cv_codec()
 
         def show_more(event=None):
-            self.d_moreframe.place(x=0, y=262, width=FW, height=94)
+            self.d_moreframe.place(x=0, y=262, relwidth=1.0, width=0,
+                                   height=94)
         self._show_more_cb = show_more
+
+        def relayout(*_):
+            W = p.winfo_width()
+            if W < 40:
+                return
+            gg = {"X0": X0, "CW": max(300, W - X0 - 44)}
+            gg["HALF"] = (gg["CW"] - GAP) // 2
+            gg["L"] = gg["X0"]
+            gg["R"] = gg["X0"] + gg["HALF"] + GAP
+            for w, x, y, wd, h, kw in specs:
+                kw = dict(kw, y=y, x=x(gg) if callable(x) else x)
+                if wd is not None:
+                    kw["width"] = wd(gg) if callable(wd) else wd
+                if h is not None:
+                    kw["height"] = h
+                w.place(**kw)
+            self._place_icons()
+        p.bind("<Configure>", relayout)
+        relayout()
         return p
 
     def _hosters_menu(self):
@@ -811,14 +1008,6 @@ class App:
         else:
             self._show_more_cb()
             self.d_more.set(True)
-
-    def _toggle_more_c(self):
-        if self.c_more.get():
-            self.c_moreframe.place_forget()
-            self.c_more.set(False)
-        else:
-            self._show_more_c_cb()
-            self.c_more.set(True)
 
     def paste_into_url(self):
         try:
@@ -909,33 +1098,45 @@ class App:
         p = tk.Frame(self.page_host, bg=WHITE)
         LW, CW, GAP = 170, 700, 12
         HALF = (CW - GAP) // 2
-        X0 = LW + 24
-        FW = X0 + CW + 6
+        X0 = LW + 44
         form = tk.Frame(p, bg=WHITE)
-        form.place(relx=0.5, rely=0.44, anchor="center", width=FW, height=364)
+        # Same responsive layout scheme as the Download tab.
+        form.place(x=0, y=100, anchor="nw", relwidth=1.0, width=0,
+                   height=364)
+        specs = []
+
+        def put(w, x, y, wd=None, h=None, **kw):
+            specs.append((w, x, y, wd, h, kw))
 
         def dot(y):
             tk.Label(form, text="\u25cf", fg=BLUE, bg=WHITE,
-                     font=("Segoe UI", 9)).place(x=2, y=y + 5)
+                     font=("Segoe UI", 9)).place(x=22, y=y + 5)
 
         def label(y, text):
             tk.Label(form, text=text, bg=WHITE, fg=FG, anchor="w",
-                     font=("Segoe UI", 10, "bold")).place(x=24, y=y,
+                     font=("Segoe UI", 10, "bold")).place(x=44, y=y,
                                                           width=LW - 28, height=30)
 
         L, R = X0, X0 + HALF + GAP
+        RC = lambda g: g["R"]                     # dynamic right slot
 
         def aux(y, text, cmd):
-            tk.Button(form, text=text, bd=1, relief="solid", bg=WHITE,
-                      fg=FG, activebackground=PRESSED,
-                      font=("Segoe UI", 9, "bold"), cursor="hand2",
-                      command=cmd).place(x=R, y=y, width=HALF, height=30)
+            b = tk.Button(form, text=text, bd=1, relief="solid", bg=WHITE,
+                          fg=FG, activebackground=PRESSED,
+                          font=("Segoe UI", 9, "bold"), cursor="hand2",
+                          command=cmd)
+            put(b, RC, y, lambda g: g["HALF"], 30)
 
         dot(0)
         label(0, T("Source file:"))
+        # Dashed accent ring marks the field as a drop target: files dragged
+        # from Explorer fill it on the Convert tab (see _install_file_drop).
+        ring = tk.Canvas(form, bg=WHITE, highlightthickness=0, bd=0)
+        put(ring, L, 0, lambda g: g["HALF"], 30)
+        ring.create_rectangle(1, 1, HALF - 1, 29, outline=BLUE, dash=(5, 3))
         self.c_src = tk.Entry(form, font=("Segoe UI", 10), bg=FIELD, fg=FG,
                               highlightthickness=1, highlightbackground=SEP)
-        self.c_src.place(x=L, y=0, width=HALF, height=30)
+        put(self.c_src, L + 4, 4, lambda g: g["HALF"] - 8, 22)
         self.c_src.bind("<KeyRelease>", lambda e: self._sync_c_folder())
         aux(0, T("Browse..."), self.browse_source)
 
@@ -944,10 +1145,10 @@ class App:
         self.c_container = ttk.Combobox(form, values=list(core.CONTAINERS),
                                         state="readonly")
         self.c_container.set("MP4 .mp4")
-        self.c_container.place(x=L, y=46, width=HALF, height=30)
+        put(self.c_container, L, 46, lambda g: g["HALF"], 30)
         self._combo_icon(self.c_container, "film.png")
         self.c_codec = ttk.Combobox(form, state="readonly")
-        self.c_codec.place(x=R, y=46, width=HALF, height=30)
+        put(self.c_codec, RC, 46, lambda g: g["HALF"], 30)
         self.c_container.bind("<<ComboboxSelected>>",
                               lambda e: self._fill_codec())
         self._fill_codec()
@@ -964,7 +1165,7 @@ class App:
         self.c_folder = ttk.Combobox(form, values=[self._cv_folder,
                                                    self.folder],
                                      font=("Segoe UI", 10))
-        self.c_folder.place(x=L, y=116, width=HALF, height=30)
+        put(self.c_folder, L, 116, lambda g: g["HALF"], 30)
         self._combo_icon(self.c_folder, "folder.png")
         aux(116, T("Browse..."), lambda: self.browse(self.c_folder))
         for ev in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
@@ -972,46 +1173,177 @@ class App:
         self._sync_c_folder()
 
         by = 164
-        tk.Button(form, text=T("Convert Now"), fg="white", bg=BLUE,
-                  activebackground=shade(BLUE, -0.30),
-                  activeforeground="white", bd=0, cursor="hand2",
-                  font=("Segoe UI", 11, "bold"),
-                  command=lambda: self.add_convert(start=True)).place(
-            x=L, y=by, width=HALF, height=44)
-        tk.Button(form, text=T("Convert Later"), fg="white", bg=GREEN,
-                  activebackground=shade(GREEN, -0.30),
-                  activeforeground="white", bd=0, cursor="hand2",
-                  font=("Segoe UI", 11, "bold"),
-                  command=lambda: self.add_convert(start=False)).place(
-            x=R, y=by, width=HALF, height=44)
+        b_now = tk.Button(form, text=T("Convert Now"), fg="white", bg=BLUE,
+                          activebackground=shade(BLUE, -0.30),
+                          activeforeground="white", bd=0, cursor="hand2",
+                          font=("Segoe UI", 11, "bold"),
+                          command=lambda: self.add_convert(start=True))
+        put(b_now, L, by, lambda g: g["HALF"], 44)
+        b_later = tk.Button(form, text=T("Convert Later"), fg="white",
+                            bg=GREEN,
+                            activebackground=shade(GREEN, -0.30),
+                            activeforeground="white", bd=0, cursor="hand2",
+                            font=("Segoe UI", 11, "bold"),
+                            command=lambda: self.add_convert(start=False))
+        put(b_later, RC, by, lambda g: g["HALF"], 44)
 
-        self.c_more = tk.BooleanVar(value=False)
-        more_box = tk.Frame(form, bg=WHITE, cursor="hand2")
-        chevron = self._img("chevron.png")
-        if chevron:
-            tk.Label(more_box, image=chevron, bd=0, bg=WHITE,
-                     cursor="hand2").pack(side="left", padx=(0, 6))
-        more_lbl = tk.Label(more_box, text=T("More Options"), bg=WHITE,
-                            fg=FG, font=("Segoe UI", 10, "bold"),
-                            cursor="hand2")
-        more_lbl.pack(side="left")
-        more_box.place(x=L, y=226, height=24)
-        more_box.bind("<Button-1>", lambda e: self._toggle_more_c())
-        more_lbl.bind("<Button-1>", lambda e: self._toggle_more_c())
-        self._pressable([more_box] + more_box.winfo_children())
+        # The Advanced conversion options that used to hide behind "More
+        # Options / Advanced..." live right on the tab now.  CRF leads;
+        # every change is written to cfg at once so the last used values
+        # are reloaded on the next start.
+        lab_adv = tk.Label(form, text=T("Advanced conversion options"),
+                           bg=WHITE, fg=SKYBLUE, anchor="w",
+                           font=("Segoe UI", 10, "bold"))
+        put(lab_adv, 44, 224, lambda g: g["CW"] - 20, 24)
 
-        self.c_moreframe = tk.Frame(form, bg=WHITE)
-        tk.Button(self.c_moreframe, text=T("Advanced..."), bd=1,
-                  relief="solid", bg=WHITE, fg=FG,
-                  activebackground=PRESSED, cursor="hand2",
-                  font=("Segoe UI", 9, "bold"),
-                  command=self.advanced_dialog).place(x=L, y=14,
-                                                      width=HALF, height=30)
+        def inline(y, x, text):
+            lab = tk.Label(form, text=text, bg=WHITE, fg=FG, anchor="w",
+                           font=("Segoe UI", 9))
+            put(lab, x, y, 118, 30)
+            return lab
 
-        def show_more(event=None):
-            self.c_moreframe.place(x=0, y=262, width=FW, height=58)
-        self._show_more_c_cb = show_more
+        tip_crf = T("The lower the value, the better the quality "
+                    "(and the larger the file). The higher the value, "
+                    "the worse the quality and the smaller the file.")
+        tip_abr = T("Higher bitrate = better sound and a larger file.")
+        tip_preset = T("Faster preset = quicker conversion but a larger "
+                       "file. Slower = better compression, takes longer.")
+        tip_extra = T("Extra ffmpeg options appended to the conversion "
+                      "command. Click ? for a list of useful arguments.")
+
+        lab_crf = inline(256, L, T("CRF (quality):"))
+        self.c_crf = tk.Spinbox(form, from_=14, to=35, width=4, bg=FIELD,
+                                fg=FG, insertbackground=FG, repeatinterval=80,
+                                highlightthickness=1, highlightbackground=SEP,
+                                font=("Segoe UI", 10))
+        self.c_crf.delete(0, "end")
+        self.c_crf.insert(0, str(self.cfg.get("crf", 20)))
+        self.c_crf.place(x=L + 120, y=256, width=80, height=30)
+        for ev in ("<KeyRelease>", "<FocusOut>"):
+            self.c_crf.bind(ev, lambda e: self._apply_c_crf())
+        for w in (lab_crf, self.c_crf):
+            self._tip(w, tip_crf)
+
+        lab_abr = inline(256, RC, T("Audio bitrate:"))
+        self.c_abr = ttk.Combobox(form, state="readonly",
+                                  values=["128k", "192k", "256k", "320k"])
+        self.c_abr.set(self.cfg.get("abr", "192k"))
+        put(self.c_abr, lambda g: g["R"] + 120, 256, 120, 30)
+        self.c_abr.bind("<<ComboboxSelected>>", self._apply_c_abr)
+        for w in (lab_abr, self.c_abr):
+            self._tip(w, tip_abr)
+
+        lab_preset = inline(292, L, T("CPU preset:"))
+        self.c_preset = ttk.Combobox(
+            form, state="readonly",
+            values=["veryfast", "faster", "fast", "medium", "slow"])
+        self.c_preset.set(self.cfg.get("preset", "faster"))
+        self.c_preset.place(x=L + 120, y=292, width=120, height=30)
+        self.c_preset.bind("<<ComboboxSelected>>", self._apply_c_preset)
+        for w in (lab_preset, self.c_preset):
+            self._tip(w, tip_preset)
+
+        lab_extra = inline(292, RC, T("Extra ffmpeg args:"))
+        self.c_extra = tk.Entry(form, bg=FIELD, fg=FG, insertbackground=FG,
+                                highlightthickness=1, highlightbackground=SEP,
+                                font=("Segoe UI", 9))
+        self.c_extra.insert(0, self.cfg.get("extra", ""))
+        put(self.c_extra, lambda g: g["R"] + 120, 292,
+            lambda g: g["HALF"] - 152, 30)
+        for ev in ("<KeyRelease>", "<FocusOut>", "<Return>"):
+            self.c_extra.bind(ev, self._apply_c_extra)
+        # "?" next to the field: cheat-sheet of useful ffmpeg arguments.
+        help_btn = tk.Button(form, text="?", width=2, bd=1, relief="solid",
+                             bg=WHITE, fg=FG, activebackground=PRESSED,
+                             cursor="hand2",
+                             command=lambda: self._ffmpeg_help(p))
+        put(help_btn, lambda g: g["R"] + g["HALF"] - 28, 292, 26, 30)
+        for w in (lab_extra, self.c_extra, help_btn):
+            self._tip(w, tip_extra)
+
+        def relayout(*_):
+            W = p.winfo_width()
+            if W < 40:
+                return
+            gg = {"X0": X0, "CW": max(300, W - X0 - 44)}
+            gg["HALF"] = (gg["CW"] - GAP) // 2
+            gg["L"] = gg["X0"]
+            gg["R"] = gg["X0"] + gg["HALF"] + GAP
+            for w, x, y, wd, h, kw in specs:
+                kw = dict(kw, y=y, x=x(gg) if callable(x) else x)
+                if wd is not None:
+                    kw["width"] = wd(gg) if callable(wd) else wd
+                if h is not None:
+                    kw["height"] = h
+                w.place(**kw)
+            # the dashed drop-ring follows the field width
+            ring.delete("all")
+            ring.create_rectangle(1, 1, gg["HALF"] - 1, 29,
+                                  outline=BLUE, dash=(5, 3))
+            self._place_icons()
+        p.bind("<Configure>", relayout)
+        relayout()
         return p
+
+    def _tip(self, w, text):
+        """Hover tooltip for one widget: a small bordered label that follows
+        the pointer, shown while it stays on the widget (labels and fields
+        both get it, so the meaning is found either way)."""
+        box = []
+
+        def show(_e):
+            hide()
+            top = tk.Toplevel(self.root)
+            top.wm_overrideredirect(True)
+            top.attributes("-topmost", True)
+            x = self.root.winfo_pointerx() + 14
+            y = self.root.winfo_pointery() + 16
+            tk.Label(top, text=text, bg=HEAD, fg=HEADFG, bd=1, relief="solid",
+                     font=("Segoe UI", 9), padx=8, pady=5,
+                     wraplength=340, justify="left").pack()
+            # keep the bubble fully on screen
+            top.update_idletasks()
+            w_, h_ = top.winfo_reqwidth(), top.winfo_reqheight()
+            x = min(x, self.root.winfo_screenwidth() - w_ - 4)
+            y = min(y, self.root.winfo_screenheight() - h_ - 4)
+            top.wm_geometry(f"+{max(x, 0)}+{max(y, 0)}")
+            box.append(top)
+
+        def hide(_e=None):
+            while box:
+                box.pop().destroy()
+
+        w.bind("<Enter>", show, add="+")
+        w.bind("<Leave>", hide, add="+")
+
+    def _apply_c_crf(self):
+        """Commit the Convert-tab CRF spinbox into cfg["crf"] (shared with
+        the Advanced dialog); clamp to the x264/x265 range 0-51."""
+        raw = self.c_crf.get().strip()
+        try:
+            val = max(0, min(51, int(raw)))
+        except ValueError:
+            return
+        if str(val) != raw:
+            self.c_crf.delete(0, "end")
+            self.c_crf.insert(0, str(val))
+        if str(val) != str(self.cfg.get("crf")):
+            self.cfg["crf"] = str(val)
+            self._save_config()
+
+    def _apply_c_abr(self, event=None):
+        self.cfg["abr"] = self.c_abr.get()
+        self._save_config()
+
+    def _apply_c_preset(self, event=None):
+        self.cfg["preset"] = self.c_preset.get()
+        self._save_config()
+
+    def _apply_c_extra(self, event=None):
+        val = self.c_extra.get()
+        if val != self.cfg.get("extra", ""):
+            self.cfg["extra"] = val
+            self._save_config()
 
     def _fill_codec(self):
         vals = core.codecs_for(self.c_container.get())
@@ -1171,7 +1503,7 @@ class App:
         preset = ttk.Combobox(g, state="readonly", width=10,
                               values=["veryfast", "faster", "fast", "medium",
                                       "slow"])
-        preset.set(self.cfg.get("preset", "medium"))
+        preset.set(self.cfg.get("preset", "faster"))
         preset.grid(row=1, column=1, sticky="w", padx=6)
         ttk.Label(g, text=T("CRF (quality):")).grid(row=2, column=0, sticky="w")
         crf = tk.Spinbox(g, from_=14, to=35, width=4, bg=FIELD, fg=FG)
@@ -1347,6 +1679,16 @@ class App:
         self.cfg.update({"abr": abr, "preset": preset, "crf": crf,
                          "extra": extra})
         self._save_config()
+        # keep the inline Convert-tab widgets in step with cfg
+        try:
+            self.c_crf.delete(0, "end")
+            self.c_crf.insert(0, str(self.cfg.get("crf", 20)))
+            self.c_abr.set(self.cfg.get("abr", "192k"))
+            self.c_preset.set(self.cfg.get("preset", "faster"))
+            self.c_extra.delete(0, "end")
+            self.c_extra.insert(0, self.cfg.get("extra", ""))
+        except Exception:
+            pass
         dlg.destroy()
 
     def _set_src(self, value):
@@ -1363,6 +1705,97 @@ class App:
         if f:
             self._set_src(os.path.normpath(f))
 
+    def _install_file_drop(self):
+        """Accept files dragged from Explorer onto the window.
+
+        No tkinterdnd2 in the bundled runtime, so use the raw Win32
+        DragAcceptFiles/WM_DROPFILES pair.  The shell posts WM_DROPFILES to
+        whichever HWND it associates with the drop, and with Tk that can be
+        the decorated frame or the inner client window -- so register and
+        hook both.  The window proc must stay Tcl-free (it can run between
+        Tk's event-loop iterations), hence it only parks the path in
+        self._drop_pending; _tick applies it while the Convert tab is open.
+        """
+        self._drop_pending = None
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+            # 64-bit: without argtypes ctypes would truncate HWND/HDROP and
+            # the old wndproc pointer to 32 bits inside CallWindowProcW.
+            # DragAcceptFiles/DragQuery*/DragFinish are shell32 exports.
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+            shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT,
+                                               wintypes.LPWSTR, wintypes.UINT]
+            shell32.DragQueryFileW.restype = wintypes.UINT
+            shell32.DragFinish.argtypes = [wintypes.HANDLE]
+            user32.CallWindowProcW.restype = ctypes.c_ssize_t
+            user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND,
+                                               wintypes.UINT, wintypes.WPARAM,
+                                               wintypes.LPARAM]
+            set_wl = getattr(user32, "SetWindowLongPtrW",
+                             user32.SetWindowLongW)
+            set_wl.restype = ctypes.c_void_p
+            set_wl.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+
+            inner = self.root.winfo_id()
+            outer = user32.GetParent(inner) or inner
+            self._drop_old = {}
+            self._drop_procs = []
+            for hwnd in {inner, outer}:
+                shell32.DragAcceptFiles(hwnd, True)
+                # If the app runs elevated, UIPI silently filters
+                # WM_DROPFILES from the non-elevated Explorer; allow it.
+                user32.ChangeWindowMessageFilterEx.argtypes = [
+                    wintypes.HWND, wintypes.UINT, wintypes.DWORD,
+                    wintypes.HWND]
+                user32.ChangeWindowMessageFilterEx(hwnd, 0x0233, 1, None)
+
+                def make_proc(target):
+                    @ctypes.WINFUNCTYPE(
+                        ctypes.c_long, wintypes.HWND, wintypes.UINT,
+                        wintypes.WPARAM, wintypes.LPARAM)
+                    def wnd_proc(h, msg, wparam, lparam):
+                        if msg == 0x0233:  # WM_DROPFILES, wparam = HDROP
+                            try:
+                                path = self._drop_path(wparam)
+                            except Exception:
+                                path = None
+                            if path:
+                                self._drop_pending = path
+                            return 1
+                        return user32.CallWindowProcW(self._drop_old[target],
+                                                      h, msg, wparam, lparam)
+                    return wnd_proc
+
+                # Keep the callback referenced: a collected ctypes callback
+                # would leave the window proc pointing at freed memory.
+                proc = make_proc(hwnd)
+                self._drop_procs.append(proc)
+                self._drop_old[hwnd] = set_wl(hwnd, -4, proc)
+        except Exception:
+            pass  # drag & drop is an extra: its absence never breaks the app
+
+    def _drop_path(self, hdrop):
+        """First real file of an HDROP handle (pure Win32, no Tcl calls)."""
+        import ctypes
+        shell32 = ctypes.windll.shell32
+        try:
+            n = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+            buf = ctypes.create_unicode_buffer(32768)
+            for i in range(n):
+                if shell32.DragQueryFileW(hdrop, i, buf, 32768):
+                    if os.path.isfile(buf.value):
+                        return os.path.normpath(buf.value)
+        finally:
+            shell32.DragFinish(hdrop)
+        return None
+
     # ------------------------------------------------------------ Tasks tab
     def _build_tasks_tab(self):
         p = tk.Frame(self.page_host, bg=WHITE)
@@ -1373,10 +1806,12 @@ class App:
                  True),
                 ("plus_blue.png", T("Add Files"), BLUE, self.tb_add_files,
                  True),
+                ("play.png", T("Start"), BLUE, self.start_selected, False),
+                ("minus_red.png", T("Remove"), FG,
+                 self.remove_selected, False),
                 ("play.png", T("Start All"), BLUE, self.start_all, False),
-                ("pause.png", T("Pause All"), FG, self.pause_all, False),
-                ("minus.png", T("Remove"), FG, self.remove_selected, False),
-                ("minus.png", T("Remove Completed"), FG,
+                ("pause_yellow.png", T("Pause All"), FG, self.pause_all, False),
+                ("minus_red.png", T("Remove Completed"), FG,
                  self.remove_completed, False)):
             item = tk.Frame(bar, bg=WHITE, cursor="hand2")
             img = self._img(ico)
@@ -1400,11 +1835,12 @@ class App:
         self.row_host = tk.Frame(p, bg=WHITE)
         self.row_host.pack(fill="both", expand=True, padx=8)
         cols = [T(c) for c in ("Thumbnail", "Source", "Destination",
-                               "Duration", "Size", "Status")]
-        # col_x[0] is the leading status-icon column; headers sit in col_x[1:].
-        # Source shows a short "Link" and Destination an "Open" button, so the
-        # columns can be narrow and everything fits the default 931 px window.
-        widths = (28, 110, 90, 100, 70, 80, 170)
+                               "Duration", "Size", "Status", "Notes")]
+        # col_x[0] is the leading selection-checkbox column; headers sit in
+        # col_x[1:].  Source shows a short "Link" and Destination an "Open"
+        # button, so the columns can be narrow and everything fits the
+        # default 850 px window; the Notes entry stretches to the edge.
+        widths = (28, 110, 90, 100, 70, 80, 140)
         self.col_x = [8]
         for w in widths:
             self.col_x.append(self.col_x[-1] + w + 12)
@@ -1427,8 +1863,40 @@ class App:
         self._sb_shown = True
         self.list_frame.bind("<Configure>", self._on_list_resize)
         canvas.bind("<Configure>", self._on_canvas_resize)
+        # mouse wheel over the list: Tk has no wheel support on Canvas, and
+        # wheel events never bubble up from the row widgets, so bind it at
+        # the app level and act only while the pointer is over the list
+        canvas.bind_all("<MouseWheel>", self._on_tasks_wheel)
         self.row_widgets = {}
         return p
+
+    def _on_tasks_wheel(self, event):
+        w = self.canvas.winfo_containing(event.x_root, event.y_root)
+        while w is not None and w is not self.canvas \
+                and w is not self.list_frame:
+            w = w.master
+        if w is None or not self._sb_shown:
+            return
+        # a canvas "unit" is one pixel; ~one row (30 px) per wheel notch,
+        # but spent in short animation steps so the list glides instead
+        # of jumping
+        self._wheel_pending = getattr(self, "_wheel_pending", 0) + (
+            -30 if event.delta > 0 else 30)
+        if getattr(self, "_wheel_job", None):
+            return
+
+        def tick():
+            self._wheel_job = None
+            if not self._wheel_pending:
+                return
+            step = 10 if self._wheel_pending > 0 else -10
+            if abs(self._wheel_pending) < 10:
+                step = self._wheel_pending
+            self.canvas.yview_scroll(step, "units")
+            self._wheel_pending -= step
+            if self._wheel_pending:
+                self._wheel_job = self.root.after(12, tick)
+        self._wheel_job = self.root.after(0, tick)
 
     def _on_list_resize(self, event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -1461,12 +1929,17 @@ class App:
         row = tk.Frame(self.list_frame, bg=WHITE, height=86)
         row.pack(fill="x", pady=2)
         row.pack_propagate(False)  # children use place(), so keep fixed height
-        icon = tk.Label(row, bd=0, bg=WHITE)
-        img = self._img(self.ICONS.get(t.status, "st_wait.png"))
+        # leading column: a selection checkbox (empty box by default, the
+        # green tick once picked); Start/Remove act on the picked rows
+        icon = tk.Label(row, bd=0, bg=WHITE, cursor="hand2")
+        img = self._img("st_done.png" if t.id in self.selected_ids
+                        else "box_off.png")
         if img:
             icon.configure(image=img)
         icon.place(x=(self.col_x[0] + self.col_x[1]) // 2, y=43,
                    anchor="center")
+        icon.bind("<Button-1>", lambda e, tt=t: self.toggle_select(tt))
+        self._pressable([icon])
         thumb = tk.Label(row, bg=THUMB, width=13, height=4,
                          highlightthickness=1, highlightbackground=SEP,
                          cursor="hand2")
@@ -1498,6 +1971,16 @@ class App:
         sub = tk.Label(row, text="", fg=SUB, bg=WHITE,
                        font=("Segoe UI", 9))
         sub.place(x=self.col_x[6], y=30)
+        # Notes column: a borderless 3-line multiline field that fits the
+        # row block; saved as you type
+        nt = tk.Text(row, bg=FIELD, fg=FG, insertbackground=FG,
+                     highlightthickness=0, bd=0, padx=4, pady=3,
+                     font=("Segoe UI", 9), wrap="word")
+        nt.insert("1.0", t.notes)
+        nt.place(x=self.col_x[7], y=6, relwidth=1.0,
+                 width=-(self.col_x[7] + 40), height=60)
+        nt.bind("<KeyRelease>", lambda e, tt=t: self._note_changed(tt))
+        nt.bind("<FocusOut>", lambda e, tt=t: self._save_note(tt))
         xbtn = tk.Label(row, text="✕", fg=FG, bg=WHITE,
                         font=("Segoe UI", 13), cursor="hand2")
         xbtn.place(relx=1.0, x=-8, y=6, anchor="ne")
@@ -1505,12 +1988,66 @@ class App:
         self._pressable([xbtn])
         row.bind("<Double-1>", lambda e, tt=t: self.start_task(tt))
         w = {"row": row, "icon": icon, "thumb": thumb, "src": src, "dst": dst,
-             "dur": dur, "size": size, "status": status, "sub": sub}
+             "dur": dur, "size": size, "status": status, "sub": sub,
+             "notes": nt}
         self.row_widgets[t.id] = w
         for widget in list(w.values()) + [xbtn]:
             widget.bind("<Button-3>",
                         lambda e, tt=t: self._row_menu(tt, e))
+        self._apply_filter()
         return w
+
+    # -------------------------------------------------- notes and search
+    def _note_changed(self, t):
+        """Debounced autosave while typing in the row's Notes entry."""
+        job = getattr(t, "_note_job", None)
+        if job:
+            try:
+                self.root.after_cancel(job)
+            except ValueError:
+                pass
+        t._note_job = self.root.after(700, lambda: self._save_note(t))
+
+    def _save_note(self, t):
+        w = self.row_widgets.get(t.id)
+        val = w["notes"].get("1.0", "end-1c") if w else t.notes
+        if val != t.notes:
+            t.notes = val
+            self._save_tasks()
+            self._apply_filter()   # a new note changes the search result
+
+    def _search_changed(self, *_):
+        if self._search_job:
+            try:
+                self.root.after_cancel(self._search_job)
+            except ValueError:
+                pass
+        self._search_job = self.root.after(150, self._apply_filter)
+        if self.search_var.get():
+            # anchor=center: stays vertically centered at any DPI scaling
+            self.search_clear.place(relx=1.0, x=-15, y=13, anchor="center")
+        else:
+            self.search_clear.place_forget()
+
+    def _task_matches(self, t, q):
+        # source holds the URL for downloads and the input path for
+        # converts; final_path the saved file; title the file/video name
+        hay = " ".join(x or "" for x in (t.title, t.source, t.final_path,
+                                         t.notes)).lower()
+        return q in hay
+
+    def _apply_filter(self):
+        """Keep only the rows whose task text contains the search query;
+        repacking in task order preserves the original row order."""
+        q = self.search_var.get().strip().lower()
+        for t in self.tasks:
+            w = self.row_widgets.get(t.id)
+            if w is None:
+                continue
+            if not q or self._task_matches(t, q):
+                w["row"].pack(fill="x", pady=2)
+            else:
+                w["row"].pack_forget()
 
     # ------------------------------------------------------- context menu
     def _row_menu(self, t, event):
@@ -1820,7 +2357,7 @@ class App:
         t.cv_opts = {"container": core.CONTAINERS[self.c_container.get()][0],
                      "same_folder": self.c_same.get(),
                      "abr": self.cfg.get("abr", "192k"),
-                     "preset": self.cfg.get("preset", "medium"),
+                     "preset": self.cfg.get("preset", "faster"),
                      "crf": self.cfg.get("crf", 20),
                      "extra": self.cfg.get("extra", "")}
         if group == "video":
@@ -1906,17 +2443,54 @@ class App:
             t.dropped = True  # the worker cleans up once its process ends
         self._save_tasks()
 
-    def _remove_finished(self):
-        for t in list(self.tasks):
-            if t.status in ("Done", "Failed", "Canceled"):
-                self.remove_task(t)
+    def toggle_select(self, t):
+        """Row checkbox: pick/drop the task for Start / Remove."""
+        if t.id in self.selected_ids:
+            self.selected_ids.discard(t.id)
+        else:
+            self.selected_ids.add(t.id)
 
-    remove_selected = _remove_finished  # toolbar "Remove" clears finished
+    def start_selected(self):
+        """Toolbar "Start": queue the picked tasks for download/convert."""
+        started = False
+        for t in list(self.tasks):
+            if (t.id in self.selected_ids and t.status
+                    in ("Queued", "Paused", "Canceled", "Failed")):
+                self.start_task(t)
+                started = True
+        if not started:
+            messagebox.showinfo(
+                APP_NAME, T("Select started-ready tasks (Queued, Failed, "
+                            "Paused or Canceled) to start them."))
+
+    def remove_selected(self):
+        """Toolbar "Remove": drop the picked rows from the list; the files
+        already on disk stay where they are."""
+        sel = [t for t in self.tasks if t.id in self.selected_ids]
+        if not sel:
+            messagebox.showinfo(APP_NAME, T("Nothing selected."))
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                T("Remove the selected tasks from the list?") + "\n"
+                + T("The downloaded files are kept in the folder.")):
+            return
+        for t in sel:
+            self.selected_ids.discard(t.id)
+            self.remove_task(t)
 
     def remove_completed(self):
-        for t in list(self.tasks):
-            if t.status == "Done":
-                self.remove_task(t)
+        done = [t for t in self.tasks if t.status == "Done"]
+        if not done:
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                T("Remove completed tasks from the list?") + "\n"
+                + T("The downloaded files are kept in the folder.")):
+            return
+        for t in done:
+            self.selected_ids.discard(t.id)
+            self.remove_task(t)
 
     def change_folder(self):
         folder = filedialog.askdirectory(initialdir=self.folder,
@@ -1931,13 +2505,6 @@ class App:
         os.startfile(self.folder)
 
     # ------------------------------------------------------------- refresh
-    # Queued (waiting to (re)download) and Paused share the yellow
-    # pause-bars marker, per spec.
-    ICONS = {"Queued": "st_pause.png", "Downloading": "st_run.png",
-             "Processing": "st_run.png", "Paused": "st_pause.png",
-             "Stopping": "st_pause.png", "Done": "st_done.png",
-             "Failed": "st_fail.png", "Canceled": "st_fail.png"}
-
     def _tick(self):
         try:
             self._tick_body()
@@ -1947,6 +2514,10 @@ class App:
             self.root.after(400, self._tick)
 
     def _tick_body(self):
+        if self._drop_pending:
+            path, self._drop_pending = self._drop_pending, None
+            if self.pages["Convert"].winfo_ismapped():
+                self._set_src(path)
         with self._lock:
             tasks = list(self.tasks)
         sig = [(t.id, t.status) for t in tasks]
@@ -1962,8 +2533,12 @@ class App:
                 active += 1
             if t.thumb_path:
                 self._note_thumb(t)
-            if (t.status == "Done" and t.kind == "download"
-                    and t.thumb_path and t.final_path
+            if (t.status == "Done" and t.final_path
+                    and not t.thumb_path):
+                # converted files (and other id-less tasks): grab a frame
+                # from the finished file instead of a CDN thumbnail
+                t.thumb_path = core.local_thumb_id(t.final_path)
+            if (t.status == "Done" and t.thumb_path and t.final_path
                     and not core.thumb_cached(THUMB_DIR, t.thumb_path)
                     and not getattr(t, "_thumb_repair", False)):
                 t._thumb_repair = True
@@ -1974,11 +2549,12 @@ class App:
                     and not t.final_path and not getattr(t, "_loc", False)):
                 t._loc = True
                 core._locate_output(t)   # fill final_path for the size column
-            if w.get("icon_status") != t.status:
-                img = self._img(self.ICONS.get(t.status, "st_wait.png"))
+            sel = t.id in self.selected_ids
+            if w.get("icon_sel") != sel:
+                img = self._img("st_done.png" if sel else "box_off.png")
                 if img:
                     w["icon"].configure(image=img)
-                    w["icon_status"] = t.status
+                w["icon_sel"] = sel
             w["status"].configure(
                 text=self._status_text(t),
                 fg=RED if t.status in ("Failed", "Canceled") else
