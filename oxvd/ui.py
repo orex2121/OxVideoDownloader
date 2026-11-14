@@ -791,8 +791,8 @@ class App:
         # The form spans the whole page; every pair-column field is
         # re-placed on resize (see relayout), so the tab keeps equal
         # left/right margins at any window width.
-        form.place(x=0, y=100, anchor="nw", relwidth=1.0, width=0,
-                   height=364)
+        form.place(x=0, y=76, anchor="nw", relwidth=1.0, width=0,
+                   height=410)
         specs = []
 
         def put(w, x, y, wd=None, h=None, **kw):
@@ -824,6 +824,8 @@ class App:
         if self.history:
             self.d_url.set(self.history[0])
         aux(0, T("Paste URL"), self.paste_into_url)
+        for ev in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+            self.d_url.bind(ev, lambda e: self._load_audio_tracks())
 
         dot(46)
         label(46, T("Download what:"))
@@ -857,7 +859,16 @@ class App:
         for ev in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
             self.d_folder.bind(ev, lambda e: self._save_d_folder())
 
-        by = 164
+        dot(162)
+        label(162, T("Audio track:"))
+        auto_audio = T("Auto (original/default)")
+        self._audio_codes = {auto_audio: None}
+        self.d_audio = ttk.Combobox(form, state="readonly",
+                                    values=[auto_audio])
+        self.d_audio.set(auto_audio)
+        put(self.d_audio, lambda g: g["L"], 162, lambda g: g["CW"], 30)
+
+        by = 208
         b_now = tk.Button(form, text=T("Download Now"), fg="white", bg=BLUE,
                           activebackground=shade(BLUE, -0.30),
                           activeforeground="white", bd=0, cursor="hand2",
@@ -882,7 +893,7 @@ class App:
                             fg=FG, font=("Segoe UI", 10, "bold"),
                             cursor="hand2")
         more_lbl.pack(side="left")
-        more_box.place(x=L, y=226, height=24)
+        more_box.place(x=L, y=270, height=24)
         more_box.bind("<Button-1>", lambda e: self._toggle_more())
         more_lbl.bind("<Button-1>", lambda e: self._toggle_more())
         self._pressable([more_box] + more_box.winfo_children())
@@ -942,7 +953,7 @@ class App:
         self._fill_cv_codec()
 
         def show_more(event=None):
-            self.d_moreframe.place(x=0, y=262, relwidth=1.0, width=0,
+            self.d_moreframe.place(x=0, y=306, relwidth=1.0, width=0,
                                    height=94)
         self._show_more_cb = show_more
 
@@ -1012,8 +1023,49 @@ class App:
     def paste_into_url(self):
         try:
             self.d_url.set(self.root.clipboard_get().strip())
+            self._load_audio_tracks()
         except Exception:
             pass
+
+    def _load_audio_tracks(self):
+        url = self.d_url.get().strip()
+        auto = T("Auto (original/default)")
+        self._audio_codes = {auto: None}
+        self.d_audio.configure(values=[auto, T("Loading audio tracks...")])
+        self.d_audio.set(auto)
+        if not url:
+            self.d_audio.configure(values=[auto])
+            return
+        self._audio_request = getattr(self, "_audio_request", 0) + 1
+        request = self._audio_request
+        result = queue.Queue()
+
+        def worker():
+            try:
+                result.put(core.audio_tracks(url, self.cookies_browser))
+            except Exception:
+                result.put([])
+
+        def pump():
+            try:
+                tracks = result.get_nowait()
+            except queue.Empty:
+                self.root.after(100, pump)
+                return
+            if request != self._audio_request:
+                return
+            labels = [auto]
+            for name, language, original in tracks:
+                label = f"{name} [{language}]"
+                if original:
+                    label += " — " + T("original")
+                labels.append(label)
+                self._audio_codes[label] = language
+            self.d_audio.configure(values=labels)
+            self.d_audio.set(auto)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, pump)
 
     def browse(self, combo):
         folder = filedialog.askdirectory(initialdir=combo.get() or self.folder,
@@ -1977,21 +2029,30 @@ class App:
                      highlightthickness=0, bd=0, padx=4, pady=3,
                      font=("Segoe UI", 9), wrap="word")
         nt.insert("1.0", t.notes)
+        # Reserve two fixed action columns: remove (✕) and delete file (bin).
         nt.place(x=self.col_x[7], y=6, relwidth=1.0,
-                 width=-(self.col_x[7] + 40), height=60)
+                 width=-(self.col_x[7] + 88), height=60)
         nt.bind("<KeyRelease>", lambda e, tt=t: self._note_changed(tt))
         nt.bind("<FocusOut>", lambda e, tt=t: self._save_note(tt))
         xbtn = tk.Label(row, text="✕", fg=FG, bg=WHITE,
                         font=("Segoe UI", 13), cursor="hand2")
-        xbtn.place(relx=1.0, x=-8, y=6, anchor="ne")
+        xbtn.place(relx=1.0, x=-48, y=4, width=28, height=28,
+                   anchor="ne")
         xbtn.bind("<Button-1>", lambda e, tt=t: self.remove_task(tt))
         self._pressable([xbtn])
+        trash = tk.Label(row, text="\U0001F5D1\uFE0E", fg=RED, bg=WHITE,
+                         font=("Segoe UI Symbol", 13), cursor="hand2")
+        trash.place(relx=1.0, x=-8, y=4, width=28, height=28,
+                    anchor="ne")
+        trash.bind("<Button-1>",
+                   lambda e, tt=t: self.delete_task_file(tt))
+        self._pressable([trash])
         row.bind("<Double-1>", lambda e, tt=t: self.start_task(tt))
         w = {"row": row, "icon": icon, "thumb": thumb, "src": src, "dst": dst,
              "dur": dur, "size": size, "status": status, "sub": sub,
              "notes": nt}
         self.row_widgets[t.id] = w
-        for widget in list(w.values()) + [xbtn]:
+        for widget in list(w.values()) + [xbtn, trash]:
             widget.bind("<Button-3>",
                         lambda e, tt=t: self._row_menu(tt, e))
         self._apply_filter()
@@ -2073,6 +2134,8 @@ class App:
         m.add_command(label=T("Cancel"), state=on if running else off,
                       command=lambda: self.cancel_task(t))
         m.add_command(label=T("Remove"), command=lambda: self.remove_task(t))
+        m.add_command(label=T("Delete file and task"),
+                      command=lambda: self.delete_task_file(t))
         m.add_command(label=T("Properties..."),
                       command=lambda: self.task_properties(t))
         m.add_separator()
@@ -2315,14 +2378,24 @@ class App:
         self.folder = folder
         t = self._new_task("download", url, folder)
         q = self.d_quality.current()
+        audio_language = self._audio_codes.get(self.d_audio.get())
         if self.d_what.current() == 0:
-            fmt = core.video_fmt(core.VIDEO_QUALITIES[q][1])
+            height = core.VIDEO_QUALITIES[q][1]
+            fmt = core.video_fmt(
+                height, audio_language)
+            quality_tag = f"{height}p" if height else "best"
             mp3 = False
         else:
-            fmt = core.audio_fmt(core.AUDIO_QUALITIES[q][1])
+            quality_tag = "audio-" + core.AUDIO_QUALITIES[q][1]
+            fmt = core.audio_fmt(
+                core.AUDIO_QUALITIES[q][1],
+                audio_language)
             mp3 = True
+        variant = quality_tag + "-" + (audio_language or "auto")
         t.dl_opts = {"fmt": fmt, "playlist": self.d_playlist.get(),
                      "mp3": mp3,
+                     "variant": variant,
+                     "audio_lang": audio_language,
                      "segments": int(self.d_segments.get() or 4)}
         if self.d_cv_on.get():
             ext, group = core.CONTAINERS[self.d_cv_cont.get()]
@@ -2398,7 +2471,9 @@ class App:
             return
         if url:
             self.d_url.set(url)
-            self.add_download(start=True)
+            self.show_tab("Download")
+            self.d_url.focus_set()
+            self._load_audio_tracks()
 
     def tb_add_files(self):
         files = filedialog.askopenfilenames(
@@ -2419,6 +2494,34 @@ class App:
             final = t.final_path
         if final and os.path.exists(final):
             os.startfile(final)
+
+    def delete_task_file(self, t):
+        if t.status in ("Downloading", "Processing", "Stopping"):
+            messagebox.showinfo(
+                APP_NAME, T("Stop the task before deleting its files."))
+            return
+        if not t.final_path and t.status == "Done" and t.kind == "download":
+            core._locate_output(t)
+        final = t.final_path if (t.final_path
+                                 and os.path.isfile(t.final_path)) else None
+        text = T("Delete file and task?")
+        if final:
+            text += "\n\n" + os.path.basename(final)
+        else:
+            text += "\n\n" + T("No finished file was found. Partial files "
+                                  "for this task will be deleted.")
+        if not messagebox.askyesno(APP_NAME, text, icon="warning"):
+            return
+        try:
+            if final:
+                os.remove(final)
+            if t.kind == "download":
+                core.cleanup_partial(t, keep_thumbnail=True)
+        except OSError as e:
+            messagebox.showerror(APP_NAME, T("Could not delete the file:")
+                                 + "\n" + str(e))
+            return
+        self.remove_task(t)
 
     def remove_task(self, t):
         if t.status in ("Downloading", "Processing"):

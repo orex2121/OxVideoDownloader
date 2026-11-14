@@ -107,18 +107,54 @@ def codecs_for(container_label):
     return CONTAINER_AUDIO_CODECS.get(ext, list(AUDIO_CODECS))
 
 
-def video_fmt(height):
-    if not height:
-        return "bv*+ba/b"
-    return f"bv*[height<={height}]+ba/b[height<={height}]"
+def video_fmt(height, language=None):
+    default = "bv*+ba/b" if not height else \
+        f"bv*[height<={height}]+ba/b[height<={height}]"
+    if not language:
+        return default
+    preferred = f"bv*+ba[language={language}]/b[language={language}]" \
+        if not height else \
+        (f"bv*[height<={height}]+ba[language={language}]/"
+         f"b[height<={height}][language={language}]")
+    return preferred + "/" + default
 
 
-def audio_fmt(level):
+def audio_fmt(level, language=None):
     if level == "high":
-        return "bestaudio[abr>=200]/bestaudio/best"
-    if level == "medium":
-        return "bestaudio[abr<=160]/bestaudio/best"
-    return "bestaudio/best"
+        default = "bestaudio[abr>=200]/bestaudio/best"
+        preferred = f"bestaudio[language={language}][abr>=200]/bestaudio[language={language}]"
+    elif level == "medium":
+        default = "bestaudio[abr<=160]/bestaudio/best"
+        preferred = f"bestaudio[language={language}][abr<=160]/bestaudio[language={language}]"
+    else:
+        default = "bestaudio/best"
+        preferred = f"bestaudio[language={language}]"
+    return preferred + "/" + default if language else default
+
+
+def audio_tracks(url, cookies_browser=None):
+    """Return the best display name for each available audio language."""
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+            "noplaylist": True}
+    if cookies_browser:
+        opts["cookiesfrombrowser"] = (cookies_browser,)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    tracks = {}
+    for f in info.get("formats") or []:
+        language = f.get("language")
+        if not language or f.get("acodec") == "none" \
+                or f.get("vcodec") != "none":
+            continue
+        note = str(f.get("format_note") or language)
+        name = note.split(", ", 1)[0].replace(" - dubbed-auto", "")
+        name = name.replace(" (default)", "").replace(" (original)", "")
+        score = (f.get("language_preference") or 0, f.get("abr") or 0)
+        if language not in tracks or score > tracks[language][0]:
+            tracks[language] = (score, name.strip())
+    return sorted(((name, language, score[0] > 0)
+                   for language, (score, name) in tracks.items()),
+                  key=lambda x: (not x[2], x[0].casefold()))
 
 
 # --------------------------------------------------------------------- helpers
@@ -321,8 +357,11 @@ def run_download(t, cfg, thumb_dir):
     o = t.dl_opts
     t.interrupt = None
     t.thumb_dir = thumb_dir
+    variant = o.get("variant")
+    variant_suffix = f".[{variant}]" if variant else ""
     opts = {
-        "outtmpl": os.path.join(t.folder, "%(title)s [%(id)s].%(ext)s"),
+        "outtmpl": os.path.join(
+            t.folder, f"%(title)s [%(id)s]{variant_suffix}.%(ext)s"),
         "format": o.get("fmt", "bv*+ba/b"),
         "quiet": True,
         "no_warnings": True,
@@ -647,7 +686,9 @@ def _locate_output(t):
     vid = t.thumb_path
     if not vid:
         return
-    pat = "*" + glob.escape(f"[{vid}].") + "*"
+    variant = t.dl_opts.get("variant")
+    marker = f"[{vid}]" + (f".[{variant}]" if variant else "") + "."
+    pat = "*" + glob.escape(marker) + "*"
     try:
         best = None
         for f in glob.glob(os.path.join(t.folder, pat)):
@@ -681,7 +722,7 @@ def _stopped(t):
         cleanup_partial(t)
 
 
-def cleanup_partial(t):
+def cleanup_partial(t, keep_thumbnail=False):
     """Delete yt-dlp leftovers (.part/.ytdl/.temp) and the cached thumbnail
     of a canceled download. Only ever called when the user removes a canceled
     task; paused, failed and app-exit partials must stay for resume."""
@@ -689,18 +730,20 @@ def cleanup_partial(t):
     if not vid:
         return
     try:
+        variant = t.dl_opts.get("variant")
+        marker = f"[{vid}]" + (f".[{variant}]" if variant else "")
         candidates = glob.glob(os.path.join(
-            t.folder, "*" + glob.escape(f"[{vid}]") + "*"))
+            t.folder, "*" + glob.escape(marker) + "*"))
     except OSError:
         candidates = []
-    marker = f"[{vid}].f"  # yt-dlp format fragments: title [id].f399.mp4
+    marker += ".f"  # yt-dlp format fragments: title [id].[variant].f399.mp4
     for f in candidates:
         base = os.path.basename(f)
         i = base.find(marker)
         fragment = i >= 0 and base[i + len(marker):i + len(marker) + 1].isdigit()
         if fragment or base.lower().endswith((".part", ".ytdl", ".temp")):
             _drop(f)
-    if t.thumb_dir and os.path.isdir(t.thumb_dir):
+    if not keep_thumbnail and t.thumb_dir and os.path.isdir(t.thumb_dir):
         for f in glob.glob(os.path.join(t.thumb_dir, glob.escape(vid) + ".*")):
             _drop(f)
 

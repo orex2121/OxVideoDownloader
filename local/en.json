@@ -5,6 +5,15 @@
    "tasks"
   ]
  },
+ "Audio track:": "Audio track:",
+ "Auto (original/default)": "Auto (original/default)",
+ "Loading audio tracks...": "Loading audio tracks...",
+ "original": "original",
+ "Delete file and task": "Delete file and task",
+ "Delete file and task?": "Delete file and task?",
+ "Stop the task before deleting its files.": "Stop the task before deleting its files.",
+ "No finished file was found. Partial files for this task will be deleted.": "No finished file was found. Partial files for this task will be deleted.",
+ "Could not delete the file:": "Could not delete the file:",
  "Link": "Link",
  "Open": "Open",
  "ffmpeg arguments help": "ffmpeg arguments help",
